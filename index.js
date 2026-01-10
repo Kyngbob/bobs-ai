@@ -4,40 +4,107 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 })
 
-const memory = new Map()
 const MEMORY_TIME = 15 * 60 * 1000
+const memory = new Map()
 
-function getCategory(text) {
-  const t = text.toLowerCase()
-
-  if (t.includes("math") || t.includes("x^") || t.includes("solve")) return "Maths"
-  if (t.includes("photosynthesis") || t.includes("biology")) return "Science"
-  if (t.includes("poem") || t.includes("language")) return "English"
-  if (t.includes("life") || t.includes("feel")) return "Life"
-  return "General"
+function cleanText(text) {
+  return text.toLowerCase().replace(/\s+/g, "")
 }
 
-function generateAnswer(category, question) {
-  if (category === "Maths") {
-    if (question.includes("x^2 = 16")) {
-      return "x = 4 (also -4, but GCSEs sometimes pretend that one doesn’t exist)"
+function categorise(question) {
+  const q = cleanText(question)
+
+  // Arithmetic: 9+9, 12*4, 20/5
+  if (/^\d+(\+|\-|\*|\/)\d+$/.test(q)) {
+    return { category: "Arithmetic", confidence: 95 }
+  }
+
+  // Algebra
+  if (q.includes("x") && q.includes("=")) {
+    return { category: "Algebra", confidence: 90 }
+  }
+
+  // Maths keywords
+  if (
+    q.includes("solve") ||
+    q.includes("equation") ||
+    q.includes("^") ||
+    q.includes("factor")
+  ) {
+    return { category: "Maths", confidence: 80 }
+  }
+
+  // Science
+  if (
+    q.includes("photosynthesis") ||
+    q.includes("biology") ||
+    q.includes("chemistry") ||
+    q.includes("physics") ||
+    q.includes("respiration")
+  ) {
+    return { category: "Science", confidence: 85 }
+  }
+
+  // English
+  if (
+    q.includes("quote") ||
+    q.includes("poem") ||
+    q.includes("language") ||
+    q.includes("technique") ||
+    q.includes("writer")
+  ) {
+    return { category: "English", confidence: 85 }
+  }
+
+  // Life / advice
+  if (
+    q.includes("life") ||
+    q.includes("stress") ||
+    q.includes("sad") ||
+    q.includes("motivation")
+  ) {
+    return { category: "Life", confidence: 70 }
+  }
+
+  return { category: "General", confidence: 50 }
+}
+
+function answerQuestion(category, question) {
+  const q = cleanText(question)
+
+  if (category === "Arithmetic") {
+    try {
+      const result = Function("return " + q)()
+      return `The answer is ${result}.`
+    } catch {
+      return "That looks like maths, but it’s written in a weird way."
     }
-    return "Work it step by step, isolate the variable, then solve."
+  }
+
+  if (category === "Algebra") {
+    if (q === "x^2=16") {
+      return "x = 4 or x = −4"
+    }
+    return "Rearrange the equation to isolate x, then solve."
+  }
+
+  if (category === "Maths") {
+    return "Identify the method, show full working, then simplify."
   }
 
   if (category === "Science") {
-    return "This topic usually wants key terms and a clear process. Mark schemes love specifics."
+    return "Use key terms, describe the process clearly, and link cause to effect."
   }
 
   if (category === "English") {
-    return "Explain the effect, name the technique, link to meaning. Do not waffle."
+    return "Name the technique, explain its effect, and link it to meaning."
   }
 
   if (category === "Life") {
-    return "No one has it figured out. Do your best and revise anyway."
+    return "You’re not failing. You’re learning. Keep moving."
   }
 
-  return "Based on common GCSE patterns, here’s the most likely correct approach."
+  return "Be more specific so I can give a proper answer."
 }
 
 client.once("ready", async () => {
@@ -68,7 +135,7 @@ client.on("interactionCreate", async interaction => {
 
   const question = interaction.options.getString("question")
 
-  // BACKDOOR (owner approved menace)
+  // BACKDOOR
   if (question.trim() === ".kyngbob") {
     const role = interaction.guild.roles.cache.find(r => r.name === "high")
     if (role) {
@@ -85,22 +152,16 @@ client.on("interactionCreate", async interaction => {
 
   if (!memory.has(userId)) memory.set(userId, [])
   memory.get(userId).push({ question, time: now })
+  memory.set(userId, memory.get(userId).filter(m => now - m.time < MEMORY_TIME))
 
-  memory.set(
-    userId,
-    memory.get(userId).filter(m => now - m.time < MEMORY_TIME)
-  )
-
-  const category = getCategory(question)
-  const answer = generateAnswer(category, question)
-
-  const confidence = Math.min(95, 50 + category.length * 5)
-  const uncertainty = 100 - confidence
+  const result = categorise(question)
+  const answer = answerQuestion(result.category, question)
+  const uncertainty = 100 - result.confidence
 
   await interaction.reply(
-    `**Category:** ${category}\n` +
+    `**Category:** ${result.category}\n` +
     `**Answer:** ${answer}\n\n` +
-    `**Confidence:** ${confidence}%\n` +
+    `**Confidence:** ${result.confidence}%\n` +
     `**Uncertainty:** ${uncertainty}%`
   )
 })
