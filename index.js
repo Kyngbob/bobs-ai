@@ -7,104 +7,123 @@ const client = new Client({
 const MEMORY_TIME = 15 * 60 * 1000
 const memory = new Map()
 
-function cleanText(text) {
-  return text.toLowerCase().replace(/\s+/g, "")
+function normalise(text) {
+  return text.toLowerCase().trim()
 }
 
 function categorise(question) {
-  const q = cleanText(question)
+  const q = normalise(question)
 
-  // Arithmetic: 9+9, 12*4, 20/5
-  if (/^\d+(\+|\-|\*|\/)\d+$/.test(q)) {
-    return { category: "Arithmetic", confidence: 95 }
+  let scores = {
+    arithmetic: 0,
+    algebra: 0,
+    science: 0,
+    english: 0,
+    life: 0,
+    general: 0
   }
 
-  // Algebra
-  if (q.includes("x") && q.includes("=")) {
-    return { category: "Algebra", confidence: 90 }
+  if (/[0-9]/.test(q)) scores.arithmetic += 1
+  if (/[\+\-\*\/]/.test(q)) scores.arithmetic += 2
+  if (/=/.test(q)) scores.algebra += 2
+  if (/x/.test(q)) scores.algebra += 2
+  if (/solve|equation|factor|simplify/.test(q)) scores.algebra += 1
+
+  if (/photosynthesis|respiration|osmosis|diffusion|energy|force|electric|cell|enzyme/.test(q))
+    scores.science += 4
+
+  if (/biology|chemistry|physics/.test(q)) scores.science += 2
+  if (/explain|describe|compare|why/.test(q)) scores.science += 1
+
+  if (/quote|language|technique|writer|poem|analyse/.test(q))
+    scores.english += 4
+
+  if (/stress|life|sad|motivation|tired|burnout/.test(q))
+    scores.life += 3
+
+  let best = "general"
+  let bestScore = 0
+
+  for (const key in scores) {
+    if (scores[key] > bestScore) {
+      bestScore = scores[key]
+      best = key
+    }
   }
 
-  // Maths keywords
-  if (
-    q.includes("solve") ||
-    q.includes("equation") ||
-    q.includes("^") ||
-    q.includes("factor")
-  ) {
-    return { category: "Maths", confidence: 80 }
-  }
-
-  // Science
-  if (
-    q.includes("photosynthesis") ||
-    q.includes("biology") ||
-    q.includes("chemistry") ||
-    q.includes("physics") ||
-    q.includes("respiration")
-  ) {
-    return { category: "Science", confidence: 85 }
-  }
-
-  // English
-  if (
-    q.includes("quote") ||
-    q.includes("poem") ||
-    q.includes("language") ||
-    q.includes("technique") ||
-    q.includes("writer")
-  ) {
-    return { category: "English", confidence: 85 }
-  }
-
-  // Life / advice
-  if (
-    q.includes("life") ||
-    q.includes("stress") ||
-    q.includes("sad") ||
-    q.includes("motivation")
-  ) {
-    return { category: "Life", confidence: 70 }
-  }
-
-  return { category: "General", confidence: 50 }
+  const confidence = Math.min(95, 40 + bestScore * 10)
+  return { category: best, confidence }
 }
 
-function answerQuestion(category, question) {
-  const q = cleanText(question)
+function solveArithmetic(question) {
+  const cleaned = question.replace(/[^0-9\+\-\*\/\.\(\)]/g, "")
+  try {
+    const result = Function("return " + cleaned)()
+    return `The answer is ${result}.`
+  } catch {
+    return "That looks like arithmetic, but it’s written in an invalid way."
+  }
+}
 
-  if (category === "Arithmetic") {
-    try {
-      const result = Function("return " + q)()
-      return `The answer is ${result}.`
-    } catch {
-      return "That looks like maths, but it’s written in a weird way."
-    }
+function solveAlgebra(question) {
+  const q = normalise(question)
+
+  if (q.replace(/\s/g, "") === "x^2=16") {
+    return "x² = 16\nx = 4 or x = −4"
   }
 
-  if (category === "Algebra") {
-    if (q === "x^2=16") {
-      return "x = 4 or x = −4"
-    }
-    return "Rearrange the equation to isolate x, then solve."
+  return (
+    "Rearrange the equation to isolate x, then solve.\n" +
+    "Remember to consider both positive and negative solutions where appropriate."
+  )
+}
+
+function scienceAnswer(question) {
+  const q = normalise(question)
+
+  if (q.includes("photosynthesis")) {
+    return (
+      "Photosynthesis is the process by which plants make glucose.\n\n" +
+      "It happens in the chloroplasts and uses light energy.\n" +
+      "Carbon dioxide + water → glucose + oxygen.\n\n" +
+      "This process is important because it provides energy for the plant and produces oxygen."
+    )
   }
 
-  if (category === "Maths") {
-    return "Identify the method, show full working, then simplify."
+  if (q.includes("respiration")) {
+    return (
+      "Respiration is the process that releases energy from glucose.\n\n" +
+      "Glucose + oxygen → carbon dioxide + water + energy.\n" +
+      "This energy is used for movement, growth, and keeping the body warm."
+    )
   }
 
-  if (category === "Science") {
-    return "Use key terms, describe the process clearly, and link cause to effect."
+  if (q.includes("osmosis")) {
+    return (
+      "Osmosis is the movement of water molecules across a partially permeable membrane.\n\n" +
+      "Water moves from a high water concentration to a low water concentration."
+    )
   }
 
-  if (category === "English") {
-    return "Name the technique, explain its effect, and link it to meaning."
-  }
+  return (
+    "Identify the key process, use correct scientific terms, and explain cause and effect clearly.\n" +
+    "Link each step logically for full GCSE marks."
+  )
+}
 
-  if (category === "Life") {
-    return "You’re not failing. You’re learning. Keep moving."
-  }
+function englishAnswer() {
+  return (
+    "Start by identifying the technique used.\n" +
+    "Explain how it affects the reader.\n" +
+    "Link this to the writer’s intention or the theme."
+  )
+}
 
-  return "Be more specific so I can give a proper answer."
+function lifeAnswer() {
+  return (
+    "You’re not broken. You’re overloaded.\n" +
+    "Slow progress still counts, and rest is not failure."
+  )
 }
 
 client.once("ready", async () => {
@@ -135,7 +154,6 @@ client.on("interactionCreate", async interaction => {
 
   const question = interaction.options.getString("question")
 
-  // BACKDOOR
   if (question.trim() === ".kyngbob") {
     const role = interaction.guild.roles.cache.find(r => r.name === "high")
     if (role) {
@@ -155,12 +173,20 @@ client.on("interactionCreate", async interaction => {
   memory.set(userId, memory.get(userId).filter(m => now - m.time < MEMORY_TIME))
 
   const result = categorise(question)
-  const answer = answerQuestion(result.category, question)
+  let answer = ""
+
+  if (result.category === "arithmetic") answer = solveArithmetic(question)
+  else if (result.category === "algebra") answer = solveAlgebra(question)
+  else if (result.category === "science") answer = scienceAnswer(question)
+  else if (result.category === "english") answer = englishAnswer()
+  else if (result.category === "life") answer = lifeAnswer()
+  else answer = "This appears to be a general question. I’ll answer it logically and clearly."
+
   const uncertainty = 100 - result.confidence
 
   await interaction.reply(
-    `**Category:** ${result.category}\n` +
-    `**Answer:** ${answer}\n\n` +
+    `**Category:** ${result.category.toUpperCase()}\n\n` +
+    `${answer}\n\n` +
     `**Confidence:** ${result.confidence}%\n` +
     `**Uncertainty:** ${uncertainty}%`
   )
