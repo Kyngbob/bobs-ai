@@ -1,176 +1,129 @@
-import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } from "discord.js"
+const { Client, GatewayIntentBits } = require('discord.js');
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] })
-const MEMORY_TIME = 15 * 60 * 1000
-const memory = new Map()
-function normalise(text) { return text.toLowerCase().trim() }
+// 15-min memory per user
+const userMemory = new Map();
 
-// === FULL HIGHER GCSE SCIENCE ===
-const scienceTopics = {
-  "photosynthesis": "Photosynthesis is the process by which plants produce glucose using sunlight, CO₂, and water: 6CO₂ + 6H₂O → C₆H₁₂O₆ + 6O₂. Chlorophyll in chloroplasts captures light energy. Important for plant growth and energy in ecosystems.",
-  "respiration": "Cellular respiration converts glucose and oxygen into ATP (energy), CO₂, and water: C₆H₁₂O₆ + 6O₂ → 6CO₂ + 6H₂O + energy. Aerobic respiration yields more ATP than anaerobic.",
-  "osmosis": "Osmosis is the movement of water molecules across a partially permeable membrane from high water potential to low water potential. Vital for plant turgor and animal cell balance.",
-  "diffusion": "Diffusion is the passive movement of particles from high concentration to low concentration.",
-  "specific heat capacity": "Energy required to raise 1 kg of a substance by 1°C: Q = mcΔT.",
-  "latent heat": "Energy absorbed/released during a change of state without temperature change: Q = mL (L = latent heat of fusion/vaporisation).",
-  "relative formula mass": "Sum of relative atomic masses of all atoms in a compound.",
-  "forces": "Forces cause motion/deformation. Include gravity, friction, tension, normal. Newton’s laws: F = ma, action-reaction, inertia.",
-  "energy": "Energy exists as kinetic, potential, chemical, thermal, nuclear. Work done: W = F × d. Power: P = W / t. Conservation applies.",
-  "electricity": "Current, voltage, resistance: V = IR. Power: P = VI. Series and parallel circuit rules.",
-  "waves": "Transverse and longitudinal waves transfer energy without moving matter. Properties: wavelength, frequency, amplitude, speed: v = fλ.",
-  "magnetism": "Magnets produce magnetic fields. Like poles repel, unlike attract. Electromagnets use current. Fleming’s rules apply.",
-  "atoms": "Atoms consist of protons, neutrons, electrons. Atomic number = protons, Mass number = protons+neutrons. Isotopes differ by neutrons.",
-  "chemical reactions": "Reactions rearrange atoms. Balanced equations: reactants → products. Endothermic absorbs, exothermic releases energy.",
-  "bonding": "Ionic (transfer), covalent (share), metallic (delocalised electrons). Determines melting point, conductivity, solubility.",
-  "enzymes": "Catalyse reactions. Active site binds substrate. Temperature/pH affect activity.",
-  "genetics": "Genes carry hereditary info. Dominant/recessive alleles determine traits. Punnett squares predict inheritance.",
-  "pressure": "Pressure = force/area. Gas laws: pV=constant at constant temperature. Liquid pressure: P=ρgh.",
-  "density": "Density = mass/volume. Determines floating/sinking.",
-  "acids and bases": "Acids release H⁺, bases release OH⁻. pH 0–14. Neutralisation: acid + base → salt + water.",
-  "rates of reaction": "Rate affected by concentration, temperature, surface area, catalysts.",
-  "electrolysis": "Ionic compounds split using electricity. Ions move to opposite electrodes.",
-  "periodic table": "Elements arranged by increasing atomic number. Groups have similar properties. Period trends affect reactivity."
-}
+// === MASTER GCSE TOPIC MAP ===
+const masterTopics = {
+  // --- BIOLOGY ---
+  "cell structure": "Cells are the basic units of life. Animal cells: nucleus, cytoplasm, membrane. Plant cells: cell wall, chloroplasts, vacuole.",
+  "cell division": "Mitosis: identical cells for growth/repair. Meiosis: gametes with half chromosomes for sexual reproduction.",
+  "organ systems": "Digestive, circulatory, respiratory, nervous, endocrine, excretory systems. Organs form systems.",
+  "transport in humans": "Blood carries oxygen/nutrients; arteries, veins, capillaries; heart structure and circulation.",
+  "homeostasis": "Maintaining stable internal conditions: temperature, water, blood glucose. Feedback loops.",
+  "enzymes": "Biological catalysts. Specific substrate. Rate affected by temperature, pH, concentration.",
+  "photosynthesis": "6CO2 + 6H2O → C6H12O6 + 6O2. Light energy → chemical energy in chloroplasts.",
+  "respiration": "Aerobic: glucose + O2 → CO2 + H2O + energy. Anaerobic: glucose → lactic acid (animals) or ethanol + CO2 (yeast/plants).",
+  "diffusion osmosis active transport": "Diffusion: high→low concentration. Osmosis: water across membrane. Active transport: against gradient, needs energy.",
+  "genetics": "DNA → chromosomes → genes. Alleles, homozygous/heterozygous, Punnett squares, inheritance.",
+  "evolution": "Variation, selection, adaptation, survival of fittest, evolution over generations.",
+  "ecology": "Ecosystems, food chains/webs, energy transfer, nutrient cycles, population dynamics, human impact.",
+  "disease and immunity": "Pathogens, vaccinations, antibiotics, lifestyle, white blood cells, antibodies.",
 
-// === FULL HIGHER GCSE MATHS ===
-const mathsTopics = {
-  "quadratic": "Quadratics: ax²+bx+c=0. Solve: factorise, complete square, quadratic formula x=(-b±√(b²-4ac))/(2a). Example: x²=16 → x=4 or -4.",
-  "simultaneous equations": "Solve by substitution/elimination. Example: x+y=5, x-y=1 → x=3, y=2.",
-  "surds": "Simplify: √50=5√2. Rationalise denominators: 1/√2=√2/2.",
-  "functions": "f(x) maps input x to output. Example: f(x)=2x+3 → f(2)=7.",
-  "probability": "P(event)=favorable/total. Coin: P(head)=1/2.",
-  "sequences": "Arithmetic: nth term = a+(n-1)d. Geometric: nth term = ar^(n-1). Example: 2,5,8 → nth=3n-1.",
-  "graphs": "Linear, quadratic, cubic, reciprocal, trig. Identify intercepts, maxima/minima.",
-  "trigonometry": "SOHCAHTOA: sinθ=opp/hyp, cosθ=adj/hyp, tanθ=opp/adj. Pythagoras applies: a²+b²=c².",
-  "geometry": "Angles, polygons, circles, congruence, similarity, area, volume.",
-  "algebra": "Simplify, expand, factorise, solve inequalities. Example: 2x+3=7 → x=2."
-}
+  // --- CHEMISTRY ---
+  "atomic structure": "Atoms: protons, neutrons, electrons. Relative atomic mass, isotopes, electronic configuration.",
+  "periodic table": "Elements by atomic number; groups/families; trends, metals/non-metals, transition metals.",
+  "bonding": "Ionic, covalent, metallic. Properties determined by bonding type.",
+  "chemical reactions": "Exothermic/endothermic, displacement, neutralisation, combustion, precipitation, redox reactions.",
+  "quantitative chemistry": "RFM, moles, reacting masses, concentration, limiting reagents, percentage yield.",
+  "rates of reaction": "Collision theory: concentration, temperature, catalysts, surface area.",
+  "energy changes": "Exothermic releases energy; endothermic absorbs. Enthalpy change calculations.",
+  "electrolysis": "Ionic compounds split using electricity. Cations → cathode, anions → anode.",
+  "acids and bases": "pH, strong/weak acids, neutralisation, salts, indicators.",
+  "organic chemistry": "Hydrocarbons (alkanes, alkenes, alcohols, carboxylic acids), functional groups, polymerisation.",
+  "chemical analysis": "Purity, chromatography, spectroscopy, gas/ion tests.",
 
-// === ENGLISH TECHNIQUES ===
-const englishTechniques = {
-  "simile": "Compares two things using 'like' or 'as'. Explain effect + meaning.",
-  "metaphor": "States something is something else. Explain impact + link to theme.",
-  "personification": "Human qualities to non-human objects. Explain effect.",
-  "alliteration": "Repetition of consonants. Discuss rhythm/emphasis.",
-  "hyperbole": "Exaggeration for effect. Explain intensification.",
-  "onomatopoeia": "Words imitate sounds. Enhance imagery + engagement.",
-  "imagery": "Appeals to senses. Build mood/atmosphere.",
-  "tone": "Author’s attitude. Identify + effect on reader.",
-  "theme": "Central idea. Link examples to support interpretation."
+  // --- PHYSICS ---
+  "forces": "Force causes acceleration/deformation. F=ma, Newton’s laws, moments, pressure, terminal velocity.",
+  "motion": "Speed, velocity, acceleration: v=d/t, a=Δv/t. Motion graphs.",
+  "energy": "Kinetic, thermal, chemical, gravitational potential, elastic. Work: W=Fd, Power: P=W/t, efficiency.",
+  "waves": "Transverse/longitudinal, speed, frequency, wavelength, reflection/refraction, sound & EM spectrum.",
+  "electricity": "Current, voltage, resistance: V=IR. Series/parallel circuits. Power: P=VI. Domestic electricity.",
+  "magnetism": "Magnetic fields, electromagnets, motor effect, electromagnetic induction.",
+  "pressure": "Pressure = force/area; gas laws: pV=constant; liquid pressure: P=ρgh.",
+  "density": "Density = mass/volume. Archimedes principle.",
+  "particle model": "States of matter, density, diffusion, gas pressure, specific heat capacity, latent heat.",
+  "radioactivity": "Alpha, beta, gamma radiation, half-life, contamination, safety.",
+
+  // --- MATHS ---
+  "algebra": "Simplify, expand, factorise, solve equations/inequalities. Quadratics: factorise, complete square, quadratic formula.",
+  "simultaneous equations": "Solve by substitution or elimination.",
+  "functions": "f(x) notation, composite, inverse functions.",
+  "sequences": "Arithmetic: nth term = a+(n-1)d. Geometric: nth term = ar^(n-1).",
+  "trigonometry": "SOHCAHTOA, sine/cosine rule, exact values, graphs.",
+  "geometry": "Angles, polygons, circles, Pythagoras, area, perimeter, volume.",
+  "vectors": "Addition, scalar multiplication, magnitude/direction.",
+  "probability": "Theoretical probability, combined events, tree diagrams, independent/dependent events.",
+  "statistics": "Mean, median, mode, range, cumulative frequency, box plots, histograms.",
+  "graphs": "Linear, quadratic, cubic, reciprocal, exponential, circle graphs.",
+  "transformations": "Reflections, rotations, translations, enlargements, combinations.",
+
+  // --- ENGLISH LANGUAGE & LIT ---
+  "simile": "Compares using 'like' or 'as'. Analyse effect on imagery/mood.",
+  "metaphor": "States one thing is another. Analyse meaning and theme.",
+  "personification": "Human qualities to non-human things. Analyse reader impact.",
+  "alliteration": "Repeating consonants. Shows emphasis, rhythm.",
+  "hyperbole": "Exaggeration for effect. Analyse tone/intensity.",
+  "onomatopoeia": "Sound-imitating words. Enhance imagery.",
+  "imagery": "Language appealing to senses. Build mood/theme.",
+  "tone": "Author’s attitude. Analyse with evidence.",
+  "theme": "Central idea. Link textual evidence to theme.",
+  "structural techniques": "Flashback, foreshadowing, narrative perspective. Analyse effect.",
+  "language techniques": "Diction, syntax, rhetorical questions, irony. Explain purpose."
 }
 
 // === LIFE / GENERAL ===
 function lifeAnswer(q) {
-  return `Life/general: analyse situation, consider consequences, explain reasoning step-by-step, provide structured advice. Example: 'How to manage time?' → Plan, prioritise, review, reflect, revise.`
-}
-
-// === COMMAND WORD PARSER ===
-function parseCommandWord(q) {
-  const lc = normalise(q)
-  if (/explain|describe|justify/.test(lc)) return "explain"
-  if (/calculate|solve/.test(lc)) return "calculate"
-  if (/compare|contrast/.test(lc)) return "compare"
-  if (/analyse|evaluate/.test(lc)) return "analyse"
-  return "general"
+  return "Break the scenario down logically: identify the problem, weigh options, explain reasoning step-by-step, and provide structured advice supported by examples.";
 }
 
 // === CATEGORY FUNCTION ===
 function categorise(question) {
-  const q = normalise(question)
-  let scores = { arithmetic: 0, algebra: 0, science: 0, english: 0, life: 0, general: 0 }
-  if (/[0-9]/.test(q)) scores.arithmetic += 1
-  if (/[\+\-\*\/]/.test(q)) scores.arithmetic += 2
-  if (/=/.test(q)) scores.algebra += 2
-  if (/x/.test(q)) scores.algebra += 2
-  if (/solve|equation|factor|simplify/.test(q)) scores.algebra += 1
-  for (let topic in scienceTopics) if (q.includes(topic)) scores.science += 4
-  for (let topic in mathsTopics) if (q.includes(topic)) scores.arithmetic += 3
-  for (let tech in englishTechniques) if (q.includes(tech)) scores.english += 4
-  if (/explain|describe|compare|why|calculate|justify/.test(q)) scores.science += 1
-  if (/quote|language|poem|analyse|technique|writer/.test(q)) scores.english += 2
-  if (/life|advice|should|help|how/.test(q)) scores.life += 3
-  let best = "general", bestScore = 0
-  for (const key in scores) if (scores[key] > bestScore) { bestScore = scores[key]; best = key }
-  const confidence = Math.min(95, 40 + bestScore * 10)
-  return { category: best, confidence }
-}
-
-// === MATHS SOLVER ===
-function solveArithmetic(q) {
-  try { return `Answer: ${Function("return "+q.replace(/[^0-9\+\-\*\/\.\(\)]/g,""))()}` }
-  catch { return "Arithmetic looks invalid." }
-}
-function solveAlgebra(q) {
-  const normalized = normalise(q).replace(/\s/g,"")
-  if (normalized === "x^2=16") return "x²=16 → x=4 or x=−4"
-  return "Rearrange equation, consider positive & negative solutions, show all steps."
-}
-
-// === SCIENCE ANSWER ===
-function scienceAnswer(q, cmd) {
-  const nq = normalise(q)
-  for (let topic in scienceTopics) if (nq.includes(topic)) {
-    if (cmd === "explain" || cmd === "describe") return `${scienceTopics[topic]} Step-by-step: define → formula → example → units (if applicable).`
-    return scienceTopics[topic]
+  const q = question.toLowerCase();
+  let scores = { science: 0, maths: 0, english: 0, life: 0, general: 0 };
+  for (let topic in masterTopics) {
+    if (q.includes(topic)) {
+      if (["cell","bio","genetics","ecology","photosynthesis","respiration","enzyme","disease"].some(x=>topic.includes(x))) scores.science += 4;
+      else if (["atomic","bond","reaction","chemistry","acids","organic","quantitative"].some(x=>topic.includes(x))) scores.science += 4;
+      else if (["force","motion","energy","waves","electricity","magnetism","pressure","density","particle","radioactivity"].some(x=>topic.includes(x))) scores.science += 4;
+      else if (["algebra","functions","geometry","trig","vectors","probability","statistics","graphs","sequences","simultaneous","transformations"].some(x=>topic.includes(x))) scores.maths += 4;
+      else if (["simile","metaphor","personification","alliteration","hyperbole","onomatopoeia","imagery","tone","theme","structural","language"].some(x=>topic.includes(x))) scores.english += 4;
+      else scores.general += 2;
+    }
   }
-  return "Use relevant scientific terms, explain cause/effect, include formulas/examples."
+  if (/[0-9]/.test(q) || /solve|calculate|equation/.test(q)) scores.maths += 2;
+  if (/explain|describe|justify|analyse|compare/.test(q)) scores.science += 1;
+  if (/quote|language|poem|analyse|technique|writer/.test(q)) scores.english += 2;
+  if (/life|advice|should|help|how/.test(q)) scores.life += 3;
+  let best="general", bestScore=0;
+  for (const key in scores) if (scores[key]>bestScore){bestScore=scores[key];best=key;}
+  const confidence = Math.min(95,40+bestScore*10);
+  return { category: best, confidence };
 }
 
-// === ENGLISH ANSWER ===
-function englishAnswer(q, cmd) {
-  const nq = normalise(q)
-  for (let tech in englishTechniques) if (nq.includes(tech)) return `${englishTechniques[tech]} Explain clearly, give textual examples, link to theme or writer’s intention.`
-  return "Identify techniques, explain effect, link to theme, give examples."
+// === ANSWER FUNCTION ===
+function generateAnswer(q) {
+  const lc = q.toLowerCase();
+  for (let topic in masterTopics) if (lc.includes(topic)) return `${masterTopics[topic]} Step-by-step explanation if applicable.`;
+  return lifeAnswer(q);
 }
 
-// === READY / COMMAND REGISTRATION ===
-client.once("ready", async () => {
-  console.log("Bob’s AI online")
-  const commands = [
-    new SlashCommandBuilder()
-      .setName("ask")
-      .setDescription("Ask Bob’s AI a question")
-      .addStringOption(opt => opt.setName("question").setDescription("Your question").setRequired(true))
-  ].map(cmd => cmd.toJSON())
-  const rest = new REST({version:"10"}).setToken(process.env.TOKEN)
-  await rest.put(Routes.applicationCommands(client.user.id), {body: commands})
-})
-
-// === INTERACTION HANDLER ===
-client.on("interactionCreate", async interaction => {
-  if (!interaction.isChatInputCommand() || interaction.commandName !== "ask") return
-  const question = interaction.options.getString("question")
-  const userId = interaction.user.id
-  const now = Date.now()
-
-  // === MEMORY ===
-  if (!memory.has(userId)) memory.set(userId, [])
-  let userMemory = memory.get(userId).filter(m=>now-m.time<MEMORY_TIME)
-  memory.set(userId, userMemory)
-
-  if (/what (did i ask|was my last question|was my last answer)/i.test(question)) {
-    const last = userMemory.slice(-1)[0]
-    if (last) await interaction.reply(`Your last question: "${last.question}"\nAnswer: ${last.answer || "No answer stored"}`)
-    else await interaction.reply("No memory found in last 15 minutes.")
-    return
+// === DISCORD MESSAGE HANDLER ===
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isChatInputCommand()) return;
+  if (interaction.commandName === 'ask') {
+    const question = interaction.options.getString('question');
+    
+    // Memory store
+    const mem = userMemory.get(interaction.user.id) || [];
+    mem.push({ question, time: Date.now() });
+    userMemory.set(interaction.user.id, mem.filter(x=>Date.now()-x.time<900000)); // 15 min memory
+    
+    const { category, confidence } = categorise(question);
+    const answer = generateAnswer(question);
+    await interaction.reply(`**Category:** ${category}\n**Confidence:** ${confidence}%\n**Answer:** ${answer}`);
   }
+});
 
-  // === CATEGORISE & ANSWER ===
-  const result = categorise(question)
-  const cmd = parseCommandWord(question)
-  let answer = ""
-  if (result.category === "arithmetic") answer = solveArithmetic(question)
-  else if (result.category === "algebra") answer = solveAlgebra(question)
-  else if (result.category === "science") answer = scienceAnswer(question, cmd)
-  else if (result.category === "english") answer = englishAnswer(question, cmd)
-  else if (result.category === "life") answer = lifeAnswer(question)
-  else answer = "Provide a reasoned, structured answer."
-
-  userMemory.push({question, category: result.category, answer, time: now})
-  memory.set(userId, userMemory)
-
-  const uncertainty = 100 - result.confidence
-  await interaction.reply(`**Category:** ${result.category.toUpperCase()}\n\n${answer}\n\n**Confidence:** ${result.confidence}%\n**Uncertainty:** ${uncertainty}%`)
-})
-
-client.login(process.env.TOKEN)
+client.login(process.env.TOKEN);
