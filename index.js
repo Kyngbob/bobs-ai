@@ -1,4 +1,5 @@
-const { Client, GatewayIntentBits } = require('discord.js');
+import { Client, GatewayIntentBits } from 'discord.js';
+
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
 
 // 15-min memory per user
@@ -71,7 +72,7 @@ const masterTopics = {
   "theme": "Central idea. Link textual evidence to theme.",
   "structural techniques": "Flashback, foreshadowing, narrative perspective. Analyse effect.",
   "language techniques": "Diction, syntax, rhetorical questions, irony. Explain purpose."
-}
+};
 
 // === LIFE / GENERAL ===
 function lifeAnswer(q) {
