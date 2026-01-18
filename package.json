@@ -1,13 +1,10 @@
-"engines": {
-  "node": ">=18"
-}
-
 {
   "name": "bobs-ai",
   "version": "1.0.0",
-  "description": "Fake AI GCSE Discord bot",
-  "main": "index.js",
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node index.js"
   },
