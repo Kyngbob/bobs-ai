@@ -5,6 +5,7 @@ import {
   REST,
   Routes,
   SlashCommandBuilder,
+  PermissionFlagsBits,
 } from "discord.js";
 
 // ======================
@@ -12,61 +13,71 @@ import {
 // ======================
 const DISCORD_TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID; // required for command registration
-const GUILD_ID = process.env.GUILD_ID;   // optional (recommended for instant updates)
+const GUILD_ID = process.env.GUILD_ID;   // recommended for instant updates
 
 const OLLAMA_BASE_URL =
-  (process.env.OLLAMA_BASE_URL || "https://data-bacon-guru-sum.trycloudflare.com").replace(/\/+$/, "");
+  (process.env.OLLAMA_BASE_URL || "https://enters-faster-abc-crystal.trycloudflare.com").replace(/\/+$/, "");
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3.2:3b";
 
-// Keep it modest for i3 + 4GB (and to avoid slow responses)
 const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 45000);
-const MAX_CONTEXT_TURNS = Number(process.env.MAX_CONTEXT_TURNS || 6); // per user (short)
-const MEMORY_TTL_MS = 15 * 60 * 1000; // 15 minutes
-const MAX_OUTPUT_CHARS = 1800;        // keep headroom for formatting
 
-// Simple cooldowns (stop spam & protect your Ubuntu PC)
-const COOLDOWN_MS_ASK = Number(process.env.COOLDOWN_MS_ASK || 8000);
-const COOLDOWN_MS_RP  = Number(process.env.COOLDOWN_MS_RP  || 12000);
+// RP memory only
+const RP_MEMORY_TTL_MS = 15 * 60 * 1000; // 15 minutes
+const RP_MAX_CONTEXT_TURNS = Number(process.env.RP_MAX_CONTEXT_TURNS || 10);
+
+// Discord message safety
+const MAX_OUTPUT_CHARS = 1800;
+
+// Cooldowns to protect your i3/4GB server
+const COOLDOWN_MS_ASK = Number(process.env.COOLDOWN_MS_ASK || 7000);
+const COOLDOWN_MS_RP = Number(process.env.COOLDOWN_MS_RP || 11000);
+const COOLDOWN_MS_ADMIN = 1500;
+
+// Admin identity
+// User asked: only username ".kyngbob" can do admin cmds.
+// NOTE: Discord usernames can change; for bulletproof admin control, set ADMIN_USER_ID in Railway.
+const ADMIN_USER_ID = process.env.ADMIN_USER_ID || ""; // optional but recommended
+const ADMIN_USERNAMES = new Set([".kyngbob", "kyngbob"]);
 
 // ======================
 // DISCORD CLIENT
 // ======================
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds], // interactions only
+  intents: [GatewayIntentBits.Guilds],
 });
 
-// per-user memory: [{role:'user'|'assistant', content, t}]
-const userMemory = new Map();
-// per-user cooldown: Map<userId, Map<command, lastTime>>
+// RP-only memory: userId -> [{role, content, t}]
+const rpMemory = new Map();
+
+// per-user cooldowns: Map<userId, Map<command, lastTime>>
 const cooldowns = new Map();
+
+// Global lock switch (in-memory)
+// NOTE: resets if Railway restarts/redeploys. (If you want persistence, tell me.)
+let botLocked = false;
 
 // ======================
 // SLASH COMMANDS
 // ======================
 const commands = [
+  // User cmds
   new SlashCommandBuilder()
     .setName("ask")
     .setDescription("Ask Bob's AI about GCSE, life advice, or trivia.")
     .addStringOption((opt) =>
-      opt
-        .setName("question")
-        .setDescription("Your question")
-        .setRequired(true)
+      opt.setName("question").setDescription("Your question").setRequired(true)
     ),
 
   new SlashCommandBuilder()
     .setName("rp")
-    .setDescription("Roleplay with Bob's AI (style-mimic + chaos).")
+    .setDescription("Roleplay with Bob's AI (remembers last 15 mins).")
     .addStringOption((opt) =>
-      opt
-        .setName("scenario")
-        .setDescription("What’s happening in the roleplay?")
-        .setRequired(true)
+      opt.setName("scenario").setDescription("What happens next?").setRequired(true)
     )
     .addStringOption((opt) =>
       opt
         .setName("style")
-        .setDescription("Optional: e.g. 'chaotic', 'dry', 'dramatic', 'texting', 'caps', etc.")
+        .setDescription("Optional: 'chaotic', 'dramatic', 'texting', etc.")
         .setRequired(false)
     )
     .addIntegerOption((opt) =>
@@ -77,6 +88,31 @@ const commands = [
         .setMaxValue(5)
         .setRequired(false)
     ),
+
+  // Admin cmds (only .kyngbob)
+  new SlashCommandBuilder()
+    .setName("lock")
+    .setDescription("ADMIN: Lock Bob’s AI so it stops replying to everyone.")
+    // not strictly needed, but this makes it feel “admin-y” in Discord UI:
+    .setDefaultMemberPermissions(PermissionFlagsBits.SendMessages),
+
+  new SlashCommandBuilder()
+    .setName("unlock")
+    .setDescription("ADMIN: Unlock Bob’s AI so it replies again.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.SendMessages),
+
+  new SlashCommandBuilder()
+    .setName("status")
+    .setDescription("ADMIN: Show bot status (lock state, model, base url).")
+    .setDefaultMemberPermissions(PermissionFlagsBits.SendMessages),
+
+  new SlashCommandBuilder()
+    .setName("say")
+    .setDescription("ADMIN: Make the bot say something in the channel.")
+    .addStringOption((opt) =>
+      opt.setName("text").setDescription("What should the bot say?").setRequired(true)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.SendMessages),
 ].map((c) => c.toJSON());
 
 // Register commands at startup
@@ -95,9 +131,7 @@ async function registerCommands() {
       });
       console.log("✅ Registered GUILD slash commands.");
     } else {
-      await rest.put(Routes.applicationCommands(CLIENT_ID), {
-        body: commands,
-      });
+      await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
       console.log("✅ Registered GLOBAL slash commands. (May take time to appear)");
     }
   } catch (err) {
@@ -110,6 +144,17 @@ async function registerCommands() {
 // ======================
 function now() {
   return Date.now();
+}
+
+function isAdminUser(interaction) {
+  if (ADMIN_USER_ID && interaction.user.id === ADMIN_USER_ID) return true;
+
+  // username only (user requested)
+  const uname = interaction.user.username || "";
+  // Discord also has "globalName" sometimes; we’ll accept it too
+  const gname = interaction.user.globalName || "";
+
+  return ADMIN_USERNAMES.has(uname) || ADMIN_USERNAMES.has(gname);
 }
 
 function getCooldown(userId, commandName) {
@@ -127,33 +172,16 @@ function setCooldown(userId, commandName) {
   user.set(commandName, now());
 }
 
-function cleanMemory(userId) {
-  const mem = userMemory.get(userId) || [];
-  const fresh = mem.filter((m) => now() - m.t < MEMORY_TTL_MS);
-  // keep only the last N turns
-  const trimmed = fresh.slice(-MAX_CONTEXT_TURNS);
-  userMemory.set(userId, trimmed);
-  return trimmed;
-}
-
-function pushMemory(userId, role, content) {
-  const mem = cleanMemory(userId);
-  mem.push({ role, content, t: now() });
-  userMemory.set(userId, mem.slice(-MAX_CONTEXT_TURNS));
-}
-
 function splitForDiscord(text, maxLen = MAX_OUTPUT_CHARS) {
   const chunks = [];
   let remaining = text;
 
   while (remaining.length > maxLen) {
-    // try split at a newline near the end
     let cut = remaining.lastIndexOf("\n", maxLen);
     if (cut < 800) cut = maxLen; // fallback: hard cut
     chunks.push(remaining.slice(0, cut));
     remaining = remaining.slice(cut).trimStart();
   }
-
   if (remaining.length) chunks.push(remaining);
   return chunks;
 }
@@ -195,11 +223,10 @@ function classifyAsk(question) {
   for (const s of lifeSignals) if (q.includes(s)) scoreLife += 3;
   for (const s of triviaSignals) if (q.includes(s)) scoreTrivia += 2;
 
-  // heuristics
-  if (looksLikeMath(question)) scoreGcse += 2; // maths often GCSE in your server
+  if (looksLikeMath(question)) scoreGcse += 2;
   if (/\bessay\b|\banalyse\b|\bevaluate\b|\bcompare\b|\bexplain\b|\bdescribe\b/.test(q)) scoreGcse += 1;
 
-  // if it sounds like coding/finance/legal crimes etc, flag as other
+  // obvious “not allowed / not intended” topics
   if (/\bcredit card\b|\bhack\b|\bcarding\b|\bexplosive\b|\bweapon\b/.test(q)) scoreOther += 5;
 
   const best = [
@@ -209,15 +236,59 @@ function classifyAsk(question) {
     { cat: "other", score: scoreOther },
   ].sort((a, b) => b.score - a.score)[0];
 
-  // confidence from score
   const conf = Math.max(35, Math.min(95, 40 + best.score * 8));
-  return { category: best.cat, confidence: conf, scores: { scoreGcse, scoreLife, scoreTrivia, scoreOther } };
+  return { category: best.cat, confidence: conf };
+}
+
+function adjustConfidence(base, answerText) {
+  let conf = base;
+  const a = (answerText || "").toLowerCase();
+  if (/\bnot sure\b|\bunsure\b|\bi think\b|\bmaybe\b|\bapproximately\b/.test(a)) conf -= 12;
+  if (/\bi can’t\b|\bcannot\b|\bdon’t know\b|\bunknown\b/.test(a)) conf -= 20;
+  if (/\bstep\b|\bworking\b|\btherefore\b|\bfinal answer\b/.test(a)) conf += 6;
+  return Math.max(5, Math.min(99, Math.round(conf)));
 }
 
 // ======================
-// OLLAMA CALLS
+// RP MEMORY HELPERS
 // ======================
-async function ollamaChat(messages, { temperature = 0.4, num_predict = 350 } = {}) {
+function cleanRpMemory(userId) {
+  const mem = rpMemory.get(userId) || [];
+  const fresh = mem.filter((m) => now() - m.t < RP_MEMORY_TTL_MS);
+  const trimmed = fresh.slice(-RP_MAX_CONTEXT_TURNS);
+  rpMemory.set(userId, trimmed);
+  return trimmed;
+}
+
+function pushRpMemory(userId, role, content) {
+  const mem = cleanRpMemory(userId);
+  mem.push({ role, content, t: now() });
+  rpMemory.set(userId, mem.slice(-RP_MAX_CONTEXT_TURNS));
+}
+
+function inferTypingStyle(text) {
+  const t = (text || "").trim();
+  if (!t) return "Neutral, short, casual.";
+
+  const hasEmoji = /[\u{1F300}-\u{1FAFF}]/u.test(t);
+  const manyCaps = (t.match(/[A-Z]/g) || []).length > (t.length * 0.2);
+  const lotsPunc = /[!?]{2,}|\.{3,}/.test(t);
+  const short = t.length < 40;
+  const slang = /\bomds\b|\bfr\b|\blowkey\b|\bhighkey\b|\binnit\b|\bbruh\b|\blmao\b/i.test(t);
+
+  const parts = [];
+  parts.push(short ? "Short messages" : "Longer messages");
+  if (manyCaps) parts.push("some caps");
+  if (lotsPunc) parts.push("expressive punctuation");
+  if (slang) parts.push("UK slang");
+  if (hasEmoji) parts.push("uses emojis");
+  return parts.join(", ") + ".";
+}
+
+// ======================
+// OLLAMA CALL
+// ======================
+async function ollamaChat(messages, { temperature = 0.4, num_predict = 220 } = {}) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
 
@@ -232,7 +303,7 @@ async function ollamaChat(messages, { temperature = 0.4, num_predict = 350 } = {
         messages,
         options: {
           temperature,
-          num_predict, // roughly "max tokens"
+          num_predict, // output length cap (kept moderate for speed)
         },
       }),
     });
@@ -250,37 +321,25 @@ async function ollamaChat(messages, { temperature = 0.4, num_predict = 350 } = {
   }
 }
 
-// Lightweight confidence tweak based on the generated answer text
-function adjustConfidence(base, answerText) {
-  let conf = base;
-  const a = answerText.toLowerCase();
-  if (/\bnot sure\b|\bunsure\b|\bi think\b|\bmaybe\b|\bapproximately\b/.test(a)) conf -= 12;
-  if (/\bi can’t\b|\bcannot\b|\bdon’t know\b|\bunknown\b/.test(a)) conf -= 20;
-  if (/\bstep\b|\bworking\b|\btherefore\b|\bfinal answer\b/.test(a)) conf += 6;
-  return Math.max(5, Math.min(99, Math.round(conf)));
-}
-
 // ======================
 // PROMPTS
 // ======================
 function buildAskSystemPrompt(category) {
-  // Keep it strict + exam-style, but not too long (small model).
   const base =
-    `You are "Bob's AI", a UK GCSE-focused tutor and general knowledge helper.\n` +
-    `Answer clearly and accurately.\n` +
-    `If the question is GCSE, answer in an exam-friendly way: method, working, final answer, and common mistake check.\n` +
-    `If maths: show steps and do a quick self-check.\n` +
+    `You are "Bob's AI". You help with UK GCSE subjects, life advice, and general trivia.\n` +
+    `Be accurate and clear.\n` +
+    `If maths: show steps and check the final answer briefly.\n` +
     `Keep it concise but complete.\n`;
 
   const gcse =
-    `You are answering a GCSE-style question. Use UK GCSE tone.\n` +
-    `If it’s an exam question, structure like: (1) What it’s asking (2) Steps/working (3) Final answer (4) Marks/why this scores.\n`;
+    `Answer like a GCSE tutor: definitions, steps/working, and a final answer.\n` +
+    `If it's an exam question, structure: What it asks → Working → Final answer → 1 common mistake.\n`;
 
   const life =
-    `You are giving practical life/study advice: actionable steps, options, and a short plan.\n`;
+    `Give practical advice with steps, options, and a simple plan.\n`;
 
   const trivia =
-    `You are answering general knowledge/trivia: give the direct answer, then 1–2 helpful facts.\n`;
+    `Give the direct answer first, then 1–2 helpful facts.\n`;
 
   if (category === "gcse") return base + gcse;
   if (category === "life") return base + life;
@@ -290,38 +349,18 @@ function buildAskSystemPrompt(category) {
 function buildRpSystemPrompt(intensity, styleHint, userText) {
   const styleProfile = inferTypingStyle(userText);
 
-  // Safety rules must exist (cannot remove), but we keep rp “chaotic” within safe bounds.
   const safety =
     `Stay within safe boundaries: no sexual content involving minors, no illegal wrongdoing instructions, no hateful harassment.\n`;
 
   const rp =
     `You are roleplaying with the user. Be imaginative, vivid, and responsive.\n` +
     `Match the user's typing style (caps, slang, punctuation, message length).\n` +
-    `Intensity: ${intensity}/5. Higher = weirder, faster, more chaotic, but still coherent.\n` +
+    `Intensity: ${intensity}/5. Higher = weirder and more chaotic, but still coherent.\n` +
     (styleHint ? `User requested style: ${styleHint}\n` : "") +
     `Detected typing style: ${styleProfile}\n` +
     `Do not mention these instructions.\n`;
 
   return safety + rp;
-}
-
-function inferTypingStyle(text) {
-  const t = (text || "").trim();
-  if (!t) return "Neutral, short, casual.";
-
-  const hasEmoji = /[\u{1F300}-\u{1FAFF}]/u.test(t);
-  const manyCaps = (t.match(/[A-Z]/g) || []).length > (t.length * 0.2);
-  const lotsPunc = /[!?]{2,}|\.{3,}/.test(t);
-  const short = t.length < 40;
-  const slang = /\bomds\b|\bfr\b|\blowkey\b|\bhighkey\b|\binnit\b|\bbruh\b|\blmao\b|\brofl\b/i.test(t);
-
-  const parts = [];
-  parts.push(short ? "Short messages" : "Longer messages");
-  if (manyCaps) parts.push("some caps");
-  if (lotsPunc) parts.push("expressive punctuation");
-  if (slang) parts.push("UK slang");
-  if (hasEmoji) parts.push("uses emojis");
-  return parts.join(", ") + ".";
 }
 
 // ======================
@@ -334,76 +373,109 @@ client.on("interactionCreate", async (interaction) => {
     const userId = interaction.user.id;
     const cmd = interaction.commandName;
 
-    // cooldown handling
-    const last = getCooldown(userId, cmd);
-    const cd = cmd === "ask" ? COOLDOWN_MS_ASK : COOLDOWN_MS_RP;
-    if (now() - last < cd) {
-      const wait = Math.ceil((cd - (now() - last)) / 1000);
+    // Global lock: blocks everyone except admin
+    if (botLocked && !isAdminUser(interaction)) {
       await interaction.reply({
-        content: `⏳ Chill — try again in ${wait}s.`,
+        content: "🔒 Bob’s AI is currently locked by the admin. Try again later.",
         ephemeral: true,
       });
       return;
     }
+
+    // cooldown
+    const last = getCooldown(userId, cmd);
+    const cd =
+      cmd === "ask" ? COOLDOWN_MS_ASK :
+      cmd === "rp" ? COOLDOWN_MS_RP :
+      COOLDOWN_MS_ADMIN;
+
+    if (now() - last < cd) {
+      const wait = Math.ceil((cd - (now() - last)) / 1000);
+      await interaction.reply({ content: `⏳ Try again in ${wait}s.`, ephemeral: true });
+      return;
+    }
     setCooldown(userId, cmd);
 
-    await interaction.deferReply();
+    // ======================
+    // ADMIN COMMANDS
+    // ======================
+    if (cmd === "lock" || cmd === "unlock" || cmd === "status" || cmd === "say") {
+      if (!isAdminUser(interaction)) {
+        await interaction.reply({ content: "❌ You are not allowed to use admin commands.", ephemeral: true });
+        return;
+      }
 
-    if (cmd === "ask") {
-      const question = interaction.options.getString("question", true).trim();
+      if (cmd === "lock") {
+        botLocked = true;
+        await interaction.reply("🔒 Locked. Bob’s AI will not reply to anyone until you run `/unlock`.");
+        return;
+      }
 
-      // classify + gate
-      const { category, confidence: baseConf } = classifyAsk(question);
+      if (cmd === "unlock") {
+        botLocked = false;
+        await interaction.reply("🔓 Unlocked. Bob’s AI is back online.");
+        return;
+      }
 
-      if (category === "other") {
-        await interaction.editReply(
-          `❌ Keep it **GCSE**, **life-related**, or **trivia/general knowledge**.\nTry rephrasing your question in one of those ways.`
+      if (cmd === "status") {
+        await interaction.reply(
+          `**Status**\n` +
+          `Locked: **${botLocked ? "YES" : "NO"}**\n` +
+          `Model: **${OLLAMA_MODEL}**\n` +
+          `Base URL: **${OLLAMA_BASE_URL}**\n` +
+          `RP memory turns: **${RP_MAX_CONTEXT_TURNS}** (15 min TTL)\n`
         );
         return;
       }
 
-      // memory
-      cleanMemory(userId);
-      pushMemory(userId, "user", question);
+      if (cmd === "say") {
+        const text = interaction.options.getString("text", true);
+        await interaction.reply({ content: "✅ Sent.", ephemeral: true });
+        // send to channel
+        await interaction.channel.send(text);
+        return;
+      }
+    }
+
+    // For user cmds, defer (AI call can take time)
+    await interaction.deferReply();
+
+    // ======================
+    // /ask (NO MEMORY)
+    // ======================
+    if (cmd === "ask") {
+      const question = interaction.options.getString("question", true).trim();
+
+      const { category, confidence: baseConf } = classifyAsk(question);
+
+      if (category === "other") {
+        await interaction.editReply(
+          `❌ Keep it **GCSE**, **life-related**, or **trivia/general knowledge**.\n` +
+          `Try rephrasing your question in one of those ways.`
+        );
+        return;
+      }
 
       const system = buildAskSystemPrompt(category);
 
-      // Keep short context to protect your 4GB server
-      const mem = cleanMemory(userId);
-      const context = mem.map(({ role, content }) => ({ role, content }));
-
+      // NO MEMORY: only system + this question
       const messages = [
         { role: "system", content: system },
-        ...context,
         { role: "user", content: question },
       ];
 
-      // Make maths a bit more careful
-      const temp = looksLikeMath(question) ? 0.15 : 0.4;
-      const num_predict = looksLikeMath(question) ? 420 : 320;
+      // Faster settings for low-spec server
+      const temp = looksLikeMath(question) ? 0.2 : 0.5;
+      const num_predict = looksLikeMath(question) ? 260 : 220;
 
-      let answer = await ollamaChat(messages, { temperature: temp, num_predict });
-
-      // OPTIONAL: quick self-check pass for maths (small extra cost, boosts accuracy)
-      if (looksLikeMath(question)) {
-        const checkMessages = [
-          { role: "system", content: "You are checking the correctness of a GCSE maths solution. If any step is wrong, fix it and give the corrected final answer with working. If it is correct, restate the final answer and a 1-line check." },
-          { role: "user", content: `Question: ${question}\n\nProposed solution:\n${answer}` },
-        ];
-        const checked = await ollamaChat(checkMessages, { temperature: 0.1, num_predict: 260 });
-        // Use the checked version if it looks non-empty
-        if (checked && checked.length > 30) answer = checked;
-      }
-
-      pushMemory(userId, "assistant", answer);
+      const answer = await ollamaChat(messages, { temperature: temp, num_predict });
 
       const conf = adjustConfidence(baseConf, answer);
 
-      const header =
+      const out =
         `**Category:** ${category.toUpperCase()}\n` +
-        `**Confidence:** ${conf}%\n`;
-
-      const out = header + `\n${answer}`;
+        `**Confidence:** ${conf}%\n\n` +
+        `${answer}`;
 
       const chunks = splitForDiscord(out);
       await interaction.editReply(chunks[0]);
@@ -413,18 +485,20 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
+    // ======================
+    // /rp (WITH MEMORY)
+    // ======================
     if (cmd === "rp") {
       const scenario = interaction.options.getString("scenario", true).trim();
       const style = interaction.options.getString("style")?.trim() || "";
       const intensity = interaction.options.getInteger("intensity") || 4;
 
-      // memory
-      cleanMemory(userId);
-      pushMemory(userId, "user", scenario);
+      cleanRpMemory(userId);
+      pushRpMemory(userId, "user", scenario);
 
       const system = buildRpSystemPrompt(intensity, style, scenario);
 
-      const mem = cleanMemory(userId);
+      const mem = cleanRpMemory(userId);
       const context = mem.map(({ role, content }) => ({ role, content }));
 
       const messages = [
@@ -433,14 +507,10 @@ client.on("interactionCreate", async (interaction) => {
         { role: "user", content: scenario },
       ];
 
-      const answer = await ollamaChat(messages, {
-        temperature: 0.85,
-        num_predict: 260,
-      });
+      const answer = await ollamaChat(messages, { temperature: 0.9, num_predict: 240 });
 
-      pushMemory(userId, "assistant", answer);
+      pushRpMemory(userId, "assistant", answer);
 
-      // confidence here is “how well it matched the prompt/style”
       const base = 70 + (intensity - 3) * 3;
       const conf = adjustConfidence(base, answer);
 
@@ -453,21 +523,22 @@ client.on("interactionCreate", async (interaction) => {
       }
       return;
     }
+
+    // fallback
+    await interaction.editReply("❓ Unknown command.");
   } catch (err) {
     console.error("❌ interactionCreate error:", err);
+
+    // Try to show a helpful short message in Discord
+    const msg =
+      "❌ Something went wrong.\n" +
+      "Common causes: tunnel URL changed, Ubuntu PC offline, model busy, or Cloudflare blocking POST.\n";
+
     try {
       if (interaction.deferred || interaction.replied) {
-        await interaction.editReply(
-          `❌ Something went wrong. (Common causes: tunnel URL changed, Ubuntu PC offline, model busy)\n` +
-          `If it keeps happening, tell me what you see in Railway logs.`
-        );
+        await interaction.editReply(msg);
       } else {
-        await interaction.reply({
-          content:
-            `❌ Something went wrong. (Common causes: tunnel URL changed, Ubuntu PC offline, model busy)\n` +
-            `If it keeps happening, tell me what you see in Railway logs.`,
-          ephemeral: true,
-        });
+        await interaction.reply({ content: msg, ephemeral: true });
       }
     } catch {}
   }
@@ -480,6 +551,7 @@ client.once("ready", async () => {
   console.log(`🤖 Logged in as ${client.user.tag}`);
   console.log(`🔗 Ollama Base URL: ${OLLAMA_BASE_URL}`);
   console.log(`🧠 Model: ${OLLAMA_MODEL}`);
+  console.log(`🔒 Locked: ${botLocked ? "YES" : "NO"}`);
 });
 
 (async function main() {
