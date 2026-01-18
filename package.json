@@ -1,3 +1,7 @@
+"engines": {
+  "node": ">=18"
+}
+
 {
   "name": "bobs-ai",
   "version": "1.0.0",
