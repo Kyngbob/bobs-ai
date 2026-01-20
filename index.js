@@ -17,46 +17,33 @@ const GUILD_ID = process.env.GUILD_ID;
 
 const OLLAMA_BASE_URL = (process.env.OLLAMA_BASE_URL || "").replace(/\/+$/, "");
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3.2:3b";
-
-// More time so /ask won’t abort on i3/4GB
 const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 120000);
 
 // /rp memory only
 const RP_MEMORY_TTL_MS = 15 * 60 * 1000;
 const RP_MAX_CONTEXT_TURNS = Number(process.env.RP_MAX_CONTEXT_TURNS || 12);
 
-// output chunking
 const MAX_DISCORD_CHARS = 1800;
 
-// cooldowns
 const COOLDOWN_MS_ASK = Number(process.env.COOLDOWN_MS_ASK || 6000);
 const COOLDOWN_MS_RP = Number(process.env.COOLDOWN_MS_RP || 9000);
 const COOLDOWN_MS_ADMIN = 1500;
 
-// Admin identity
-// Recommended: set ADMIN_USER_ID in Railway for bulletproof admin control
 const ADMIN_USER_ID = process.env.ADMIN_USER_ID || "";
-
-// EXACT username allowed for owner-only cmds
 const OWNER_USERNAME = ".kyngbob";
 
-// Role to grant (might be stylized on server)
 const HOSTER_ROLE_NAME = "; GW HOSTER :)";
 
 /* =========================
    CLIENT
 ========================= */
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+  intents: [GatewayIntentBits.Guilds], // no disallowed intents
 });
 
-// /rp memory only: userId -> [{role, content, t}]
 const rpMemory = new Map();
+const cooldowns = new Map();
 
-// cooldown tracking
-const cooldowns = new Map(); // Map<userId, Map<cmd, lastTime>>
-
-// lock state (in-memory)
 let botLocked = false;
 let lockReason = "";
 
@@ -64,7 +51,6 @@ let lockReason = "";
    SLASH COMMANDS
 ========================= */
 const commands = [
-  // USER
   new SlashCommandBuilder()
     .setName("ask")
     .setDescription("Ask Bob's AI about GCSE, life advice, or trivia.")
@@ -79,10 +65,7 @@ const commands = [
       opt.setName("scenario").setDescription("What happens next?").setRequired(true)
     )
     .addStringOption((opt) =>
-      opt
-        .setName("style")
-        .setDescription("Optional style: chaotic, dramatic, texting, etc.")
-        .setRequired(false)
+      opt.setName("style").setDescription("Optional style").setRequired(false)
     )
     .addIntegerOption((opt) =>
       opt
@@ -93,15 +76,11 @@ const commands = [
         .setRequired(false)
     ),
 
-  // ADMIN
   new SlashCommandBuilder()
     .setName("lock")
     .setDescription("ADMIN: Lock Bob’s AI (stops /ask and /rp for everyone).")
     .addStringOption((opt) =>
-      opt
-        .setName("reason")
-        .setDescription("Optional reason shown to users while locked")
-        .setRequired(false)
+      opt.setName("reason").setDescription("Optional reason shown while locked").setRequired(false)
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.SendMessages),
 
@@ -112,12 +91,9 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("lockreason")
-    .setDescription("ADMIN: View/set/clear the current lock reason.")
+    .setDescription("ADMIN: View/set/clear the lock reason.")
     .addStringOption((opt) =>
-      opt
-        .setName("reason")
-        .setDescription("Set a new reason (or type 'clear' to remove)")
-        .setRequired(false)
+      opt.setName("reason").setDescription("Set new reason or 'clear'").setRequired(false)
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.SendMessages),
 
@@ -130,14 +106,14 @@ const commands = [
     .setName("say")
     .setDescription("ADMIN: Make the bot say something in the channel.")
     .addStringOption((opt) =>
-      opt.setName("text").setDescription("What should the bot say?").setRequired(true)
+      opt.setName("text").setDescription("Text").setRequired(true)
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.SendMessages),
 
-  // OWNER-ONLY (explicit, not hidden)
+  // OWNER ONLY, simple name so you can find it
   new SlashCommandBuilder()
-    .setName("grant_hoster")
-    .setDescription(`OWNER: Give yourself the role like "${HOSTER_ROLE_NAME}"`)
+    .setName("hoster")
+    .setDescription("OWNER: give yourself the hoster role")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
 ].map((c) => c.toJSON());
 
@@ -154,7 +130,7 @@ async function registerCommands() {
       console.log("✅ Registered GUILD slash commands.");
     } else {
       await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-      console.log("✅ Registered GLOBAL slash commands (may take time to appear).");
+      console.log("✅ Registered GLOBAL slash commands (may take time).");
     }
   } catch (err) {
     console.error("❌ Command registration failed:", err);
@@ -173,9 +149,7 @@ function isOwnerByUsername(interaction) {
 }
 
 function isAdmin(interaction) {
-  // Admin for lock/unlock/status/say/lockreason
   if (ADMIN_USER_ID && interaction.user.id === ADMIN_USER_ID) return true;
-  // Fallback: owner username can admin too
   return isOwnerByUsername(interaction);
 }
 
@@ -183,7 +157,6 @@ function getCooldown(userId, cmd) {
   const m = cooldowns.get(userId);
   return m?.get(cmd) || 0;
 }
-
 function setCooldown(userId, cmd) {
   let m = cooldowns.get(userId);
   if (!m) {
@@ -217,26 +190,21 @@ function looksLikeMath(q) {
 
 function classifyAsk(question) {
   const q = (question || "").toLowerCase();
-
   const gcseHints = [
-    "gcse", "aqa", "edexcel", "ocr", "wjec", "paper", "mark scheme",
-    "higher", "foundation", "6 marker", "9 marker",
-    "osmosis", "photosynthesis", "respiration", "enzymes", "mitosis",
-    "moles", "bonding", "electrolysis", "alkanes", "alkenes",
-    "forces", "waves", "circuits", "radiation", "pressure",
-    "quadratic", "trigonometry", "circle theorem", "simultaneous",
-    "macbeth", "an inspector calls", "poem", "analysis", "structure",
-    "history", "geography", "computer science", "religious",
-    "french", "spanish"
+    "gcse","aqa","edexcel","ocr","wjec","paper","mark scheme","higher","foundation",
+    "osmosis","photosynthesis","respiration","enzymes","mitosis","moles","bonding",
+    "electrolysis","forces","waves","circuits","radiation","pressure","quadratic",
+    "trigonometry","circle theorem","simultaneous","macbeth","an inspector calls",
+    "poem","analysis","structure","history","geography","computer science","religious",
+    "french","spanish"
   ];
-  const lifeHints = ["revise", "revision", "study", "exam stress", "motivation", "how do i", "help", "tips"];
-  const triviaHints = ["trivia", "general knowledge", "who is", "what is", "capital", "when was", "where is"];
+  const lifeHints = ["revise","revision","study","exam stress","motivation","how do i","help","tips"];
+  const triviaHints = ["trivia","general knowledge","who is","what is","capital","when was","where is"];
 
   let gcse = 0, life = 0, trivia = 0;
   for (const t of gcseHints) if (q.includes(t)) gcse += 3;
   for (const t of lifeHints) if (q.includes(t)) life += 3;
   for (const t of triviaHints) if (q.includes(t)) trivia += 2;
-
   if (looksLikeMath(question)) gcse += 2;
 
   const best = [
@@ -246,7 +214,6 @@ function classifyAsk(question) {
   ].sort((a, b) => b.score - a.score)[0];
 
   if (best.score <= 0) return { category: "other", confidence: 45 };
-
   const confidence = Math.max(35, Math.min(95, 40 + best.score * 7));
   return { category: best.cat, confidence };
 }
@@ -269,7 +236,6 @@ function cleanRpMemory(userId) {
   rpMemory.set(userId, trimmed);
   return trimmed;
 }
-
 function pushRp(userId, role, content) {
   const mem = cleanRpMemory(userId);
   mem.push({ role, content, t: now() });
@@ -277,7 +243,7 @@ function pushRp(userId, role, content) {
 }
 
 /* =========================
-   OLLAMA CALL
+   OLLAMA
 ========================= */
 async function ollamaChat(messages, { temperature = 0.4, num_predict = 200 } = {}) {
   if (!OLLAMA_BASE_URL) throw new Error("Missing OLLAMA_BASE_URL");
@@ -311,7 +277,7 @@ async function ollamaChat(messages, { temperature = 0.4, num_predict = 200 } = {
 }
 
 /* =========================
-   PROMPTS (FAST but detailed)
+   PROMPTS
 ========================= */
 function askSystemPrompt(category, isMath) {
   if (category === "gcse") {
@@ -320,28 +286,18 @@ function askSystemPrompt(category, isMath) {
       `Be accurate and exam-focused.\n` +
       `Answer in this structure:\n` +
       `1) Key facts/definitions\n` +
-      `2) Method/Steps (clear)\n` +
-      `3) Exam-style explanation (marks-focused)\n` +
-      `4) Final answer / conclusion\n` +
+      `2) Method/Steps\n` +
+      `3) Exam-style explanation\n` +
+      `4) Final answer\n` +
       `5) 1 common mistake\n` +
-      (isMath ? `For maths: show neat working and clearly state the final answer.\n` : "") +
-      `Be detailed but efficient (no fluff).\n`
+      (isMath ? `For maths: show neat working and state the final answer clearly.\n` : "") +
+      `Be detailed but efficient.\n`
     );
   }
   if (category === "life") {
-    return (
-      `You are Bob's AI.\n` +
-      `Give practical life advice.\n` +
-      `Structure:\n1) What’s going on\n2) Options\n3) Best plan (steps)\n4) Quick checklist\n` +
-      `Efficient but helpful.\n`
-    );
+    return `You are Bob's AI. Give practical life advice with steps and a checklist.`;
   }
-  return (
-    `You are Bob's AI.\n` +
-    `Answer trivia/general knowledge.\n` +
-    `Structure:\n1) Direct answer\n2) 2 useful facts\n` +
-    `Be concise.\n`
-  );
+  return `You are Bob's AI. Answer trivia with a direct answer and 2 useful facts.`;
 }
 
 function rpSystemPrompt(intensity, styleHint) {
@@ -349,49 +305,48 @@ function rpSystemPrompt(intensity, styleHint) {
   return (
     `You are roleplaying with the user.\n` +
     `Match their typing style.\n` +
-    `Intensity: ${intensity}/5 (higher = weirder/chaotic).\n` +
+    `Intensity: ${intensity}/5.\n` +
     hint +
     `Do not mention rules.\n`
   );
 }
 
 /* =========================
-   ROLE MATCHING (handles "different font")
+   ROLE MATCHING
 ========================= */
 function normalizeRoleName(s) {
-  // NFKC folds many “fancy fonts” to plain forms.
-  // Then remove spaces and common punctuation differences.
   return (s || "")
     .normalize("NFKC")
     .toLowerCase()
     .replace(/\s+/g, "")
     .replace(/[“”‘’"']/g, "")
-    .replace(/[\u200B-\u200D\uFEFF]/g, ""); // zero-width chars
+    .replace(/[\u200B-\u200D\uFEFF]/g, "");
 }
 
-function findHovsterRole(guild) {
+function findHosterRole(guild) {
   const target = normalizeRoleName(HOSTER_ROLE_NAME);
   return guild.roles.cache.find((r) => normalizeRoleName(r.name) === target);
 }
 
-/* =========================
-   OWNER CMD: ROLE GRANT (explicit)
-========================= */
-async function grantHosterRole(interaction) {
+async function giveOwnerHosterRole(interaction) {
   if (!interaction.inGuild()) {
-    await interaction.reply({ content: "❌ This command only works in a server.", ephemeral: true });
+    await interaction.reply({ content: "❌ This only works in a server.", ephemeral: true });
+    return;
+  }
+  if (!isOwnerByUsername(interaction)) {
+    await interaction.reply({ content: `❌ Only ${OWNER_USERNAME} can use this.`, ephemeral: true });
     return;
   }
 
   const guild = interaction.guild;
   const member = await guild.members.fetch(interaction.user.id);
 
-  const role = findHovsterRole(guild);
+  const role = findHosterRole(guild);
   if (!role) {
     await interaction.reply({
       content:
-        `❌ I couldn't find the role (even with font-normalizing).\n` +
-        `Create a role named like: ${HOSTER_ROLE_NAME} (or same text in your font), then try again.`,
+        `❌ Couldn’t find the hoster role.\n` +
+        `Create a role named like: ${HOSTER_ROLE_NAME} (or same text in your font) and try again.`,
       ephemeral: true,
     });
     return;
@@ -399,34 +354,28 @@ async function grantHosterRole(interaction) {
 
   const botMember = await guild.members.fetchMe();
   if (!botMember.permissions.has(PermissionFlagsBits.ManageRoles)) {
-    await interaction.reply({
-      content: "❌ I need the **Manage Roles** permission to do that.",
-      ephemeral: true,
-    });
+    await interaction.reply({ content: "❌ I need **Manage Roles**.", ephemeral: true });
     return;
   }
-
   if (role.position >= botMember.roles.highest.position) {
     await interaction.reply({
-      content:
-        `❌ I can’t assign that role because it’s **above or equal to my top role**.\n` +
-        `Move it below the bot's role in Server Settings → Roles.`,
+      content: `❌ Move the hoster role below the bot’s top role in Server Settings → Roles.`,
       ephemeral: true,
     });
     return;
   }
 
   if (member.roles.cache.has(role.id)) {
-    await interaction.reply({ content: `✅ You already have the hoster role.`, ephemeral: true });
+    await interaction.reply({ content: "✅ You already have the hoster role.", ephemeral: true });
     return;
   }
 
-  await member.roles.add(role, "Owner requested hoster role");
+  await member.roles.add(role, "Owner used /hoster");
   await interaction.reply(`✅ Granted you the role: **${role.name}**`);
 }
 
 /* =========================
-   INTERACTION HANDLER
+   INTERACTIONS
 ========================= */
 client.on("interactionCreate", async (interaction) => {
   try {
@@ -435,20 +384,14 @@ client.on("interactionCreate", async (interaction) => {
     const userId = interaction.user.id;
     const cmd = interaction.commandName;
 
-    // When locked: /ask and /rp blocked for everyone
     if (botLocked && (cmd === "ask" || cmd === "rp")) {
       const reasonLine = lockReason ? `\n**Reason:** ${lockReason}` : "";
-      await interaction.reply({ content: `🔒 Bob’s AI is locked by the admin.${reasonLine}`, ephemeral: true });
+      await interaction.reply({ content: `🔒 Bob’s AI is locked.${reasonLine}`, ephemeral: true });
       return;
     }
 
-    // cooldown
     const last = getCooldown(userId, cmd);
-    const cd =
-      cmd === "ask" ? COOLDOWN_MS_ASK :
-      cmd === "rp" ? COOLDOWN_MS_RP :
-      COOLDOWN_MS_ADMIN;
-
+    const cd = cmd === "ask" ? COOLDOWN_MS_ASK : cmd === "rp" ? COOLDOWN_MS_RP : COOLDOWN_MS_ADMIN;
     if (now() - last < cd) {
       const wait = Math.ceil((cd - (now() - last)) / 1000);
       await interaction.reply({ content: `⏳ Try again in ${wait}s.`, ephemeral: true });
@@ -456,7 +399,7 @@ client.on("interactionCreate", async (interaction) => {
     }
     setCooldown(userId, cmd);
 
-    // ADMIN CMDS
+    // Admin commands
     if (cmd === "lock" || cmd === "unlock" || cmd === "status" || cmd === "say" || cmd === "lockreason") {
       if (!isAdmin(interaction)) {
         await interaction.reply({ content: "❌ Not allowed.", ephemeral: true });
@@ -468,34 +411,31 @@ client.on("interactionCreate", async (interaction) => {
         const r = interaction.options.getString("reason")?.trim() || "";
         if (r) lockReason = r;
         const reasonLine = lockReason ? `\n**Reason:** ${lockReason}` : "";
-        await interaction.reply(`🔒 Locked. /ask and /rp are disabled for everyone until /unlock.${reasonLine}`);
+        await interaction.reply(`🔒 Locked. /ask and /rp disabled until /unlock.${reasonLine}`);
         return;
       }
 
       if (cmd === "unlock") {
         botLocked = false;
         lockReason = "";
-        await interaction.reply("🔓 Unlocked. Bob’s AI is back online.");
+        await interaction.reply("🔓 Unlocked.");
         return;
       }
 
       if (cmd === "lockreason") {
         const r = interaction.options.getString("reason")?.trim();
-
         if (!r) {
           await interaction.reply(
             `**Lock reason:** ${lockReason ? lockReason : "*none set*"}\n` +
-            `Use \`/lockreason reason: <text>\` to set, or \`/lockreason reason: clear\` to remove.`
+            `Set: /lockreason reason:<text> | Clear: /lockreason reason:clear`
           );
           return;
         }
-
         if (r.toLowerCase() === "clear") {
           lockReason = "";
           await interaction.reply("✅ Cleared lock reason.");
           return;
         }
-
         lockReason = r;
         await interaction.reply(`✅ Updated lock reason to: **${lockReason}**`);
         return;
@@ -503,13 +443,9 @@ client.on("interactionCreate", async (interaction) => {
 
       if (cmd === "status") {
         await interaction.reply(
-          `**Status**\n` +
-          `Locked: **${botLocked ? "YES" : "NO"}**\n` +
-          `Lock reason: **${lockReason ? lockReason : "none"}**\n` +
-          `Model: **${OLLAMA_MODEL}**\n` +
-          `Base URL: **${OLLAMA_BASE_URL || "(missing)"}**\n` +
-          `Timeout: **${OLLAMA_TIMEOUT_MS}ms**\n` +
-          `RP memory: **${RP_MAX_CONTEXT_TURNS} turns** (15min TTL)\n`
+          `**Status**\nLocked: **${botLocked ? "YES" : "NO"}**\n` +
+          `Reason: **${lockReason ? lockReason : "none"}**\n` +
+          `Model: **${OLLAMA_MODEL}**\nBase URL: **${OLLAMA_BASE_URL || "(missing)"}**\nTimeout: **${OLLAMA_TIMEOUT_MS}ms**`
         );
         return;
       }
@@ -522,36 +458,27 @@ client.on("interactionCreate", async (interaction) => {
       }
     }
 
-    // OWNER-ONLY ROLE GRANT
-    if (cmd === "grant_hoster") {
-      if (!isOwnerByUsername(interaction)) {
-        await interaction.reply({ content: `❌ Only ${OWNER_USERNAME} can use this command.`, ephemeral: true });
-        return;
-      }
-      await grantHosterRole(interaction);
+    // /hoster (owner only)
+    if (cmd === "hoster") {
+      await giveOwnerHosterRole(interaction);
       return;
     }
 
     // defer for AI calls
     await interaction.deferReply();
 
-    // /ASK (NO MEMORY)
     if (cmd === "ask") {
       const question = interaction.options.getString("question", true).trim();
       const { category, confidence: baseConf } = classifyAsk(question);
 
       if (category === "other") {
         await interaction.editReply(
-          `❌ Keep it **GCSE**, **life-related**, or **trivia/general knowledge**.\n` +
-          `Try: “GCSE biology: …” or “Life advice: …” or “Trivia: …”`
+          `❌ Keep it GCSE / life / trivia.\nTry: “GCSE biology: …” or “Life advice: …” or “Trivia: …”`
         );
         return;
       }
 
       const isMath = looksLikeMath(question);
-
-      // Faster but still detailed:
-      // structured prompt forces detail; output cap kept moderate to avoid timeouts
       const num_predict = isMath ? 220 : 200;
       const temperature = isMath ? 0.15 : 0.35;
 
@@ -563,18 +490,13 @@ client.on("interactionCreate", async (interaction) => {
       const answer = await ollamaChat(messages, { temperature, num_predict });
       const conf = adjustConfidence(baseConf, answer);
 
-      const out =
-        `**Category:** ${category.toUpperCase()}\n` +
-        `**Confidence:** ${conf}%\n\n` +
-        answer;
-
+      const out = `**Category:** ${category.toUpperCase()}\n**Confidence:** ${conf}%\n\n${answer}`;
       const chunks = splitForDiscord(out);
       await interaction.editReply(chunks[0]);
       for (let i = 1; i < chunks.length; i++) await interaction.followUp(chunks[i]);
       return;
     }
 
-    // /RP (WITH MEMORY)
     if (cmd === "rp") {
       const scenario = interaction.options.getString("scenario", true).trim();
       const style = interaction.options.getString("style")?.trim() || "";
@@ -594,11 +516,8 @@ client.on("interactionCreate", async (interaction) => {
       const answer = await ollamaChat(messages, { temperature: 0.9, num_predict: 240 });
       pushRp(userId, "assistant", answer);
 
-      const conf = adjustConfidence(70 + (intensity - 3) * 3, answer);
-
-      const out = `**Confidence:** ${conf}%\n\n${answer}`;
+      const out = `**Confidence:** ${adjustConfidence(70, answer)}%\n\n${answer}`;
       const chunks = splitForDiscord(out);
-
       await interaction.editReply(chunks[0]);
       for (let i = 1; i < chunks.length; i++) await interaction.followUp(chunks[i]);
       return;
@@ -607,16 +526,11 @@ client.on("interactionCreate", async (interaction) => {
     await interaction.editReply("❓ Unknown command.");
   } catch (err) {
     console.error("❌ interactionCreate error:", err);
-
-    const msg =
-      "❌ Something went wrong.\n" +
-      "Likely cause: model took too long, tunnel URL changed, or server is busy.\n";
-
     try {
       if (interaction.deferred || interaction.replied) {
-        await interaction.editReply(msg);
+        await interaction.editReply("❌ Something went wrong (check Railway logs).");
       } else {
-        await interaction.reply({ content: msg, ephemeral: true });
+        await interaction.reply({ content: "❌ Something went wrong (check Railway logs).", ephemeral: true });
       }
     } catch {}
   }
@@ -627,11 +541,7 @@ client.on("interactionCreate", async (interaction) => {
 ========================= */
 client.once("ready", () => {
   console.log(`🤖 Logged in as ${client.user.tag}`);
-  console.log(`🔗 Ollama Base URL: ${OLLAMA_BASE_URL}`);
-  console.log(`🧠 Model: ${OLLAMA_MODEL}`);
-  console.log(`⏱️ Timeout: ${OLLAMA_TIMEOUT_MS}ms`);
-  console.log(`🔒 Locked: ${botLocked ? "YES" : "NO"}`);
-  console.log(`🧾 Lock reason: ${lockReason ? lockReason : "none"}`);
+  console.log(`✅ Commands registered to: ${GUILD_ID ? "GUILD" : "GLOBAL"}`);
 });
 
 (async function main() {
