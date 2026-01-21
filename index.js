@@ -110,11 +110,10 @@ const commands = [
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.SendMessages),
 
-  // OWNER ONLY, simple name so you can find it
+  // ✅ Visible to everyone (no default permissions)
   new SlashCommandBuilder()
     .setName("hoster")
-    .setDescription("OWNER: give yourself the hoster role")
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
+    .setDescription("OWNER ONLY: give .kyngbob the hoster role"),
 ].map((c) => c.toJSON());
 
 async function registerCommands() {
@@ -294,9 +293,7 @@ function askSystemPrompt(category, isMath) {
       `Be detailed but efficient.\n`
     );
   }
-  if (category === "life") {
-    return `You are Bob's AI. Give practical life advice with steps and a checklist.`;
-  }
+  if (category === "life") return `You are Bob's AI. Give practical life advice with steps and a checklist.`;
   return `You are Bob's AI. Answer trivia with a direct answer and 2 useful facts.`;
 }
 
@@ -312,7 +309,7 @@ function rpSystemPrompt(intensity, styleHint) {
 }
 
 /* =========================
-   ROLE MATCHING
+   ROLE MATCHING / HOSTER
 ========================= */
 function normalizeRoleName(s) {
   return (s || "")
@@ -334,7 +331,7 @@ async function giveOwnerHosterRole(interaction) {
     return;
   }
   if (!isOwnerByUsername(interaction)) {
-    await interaction.reply({ content: `❌ Only ${OWNER_USERNAME} can use this.`, ephemeral: true });
+    await interaction.reply({ content: `❌ Only ${OWNER_USERNAME} can use /hoster.`, ephemeral: true });
     return;
   }
 
@@ -344,9 +341,7 @@ async function giveOwnerHosterRole(interaction) {
   const role = findHosterRole(guild);
   if (!role) {
     await interaction.reply({
-      content:
-        `❌ Couldn’t find the hoster role.\n` +
-        `Create a role named like: ${HOSTER_ROLE_NAME} (or same text in your font) and try again.`,
+      content: `❌ Couldn’t find the hoster role.\nCreate a role named like: ${HOSTER_ROLE_NAME} and try again.`,
       ephemeral: true,
     });
     return;
@@ -354,7 +349,7 @@ async function giveOwnerHosterRole(interaction) {
 
   const botMember = await guild.members.fetchMe();
   if (!botMember.permissions.has(PermissionFlagsBits.ManageRoles)) {
-    await interaction.reply({ content: "❌ I need **Manage Roles**.", ephemeral: true });
+    await interaction.reply({ content: "❌ I need **Manage Roles** permission.", ephemeral: true });
     return;
   }
   if (role.position >= botMember.roles.highest.position) {
@@ -458,13 +453,12 @@ client.on("interactionCreate", async (interaction) => {
       }
     }
 
-    // /hoster (owner only)
+    // /hoster (visible to everyone, usable only by .kyngbob)
     if (cmd === "hoster") {
       await giveOwnerHosterRole(interaction);
       return;
     }
 
-    // defer for AI calls
     await interaction.deferReply();
 
     if (cmd === "ask") {
@@ -472,9 +466,7 @@ client.on("interactionCreate", async (interaction) => {
       const { category, confidence: baseConf } = classifyAsk(question);
 
       if (category === "other") {
-        await interaction.editReply(
-          `❌ Keep it GCSE / life / trivia.\nTry: “GCSE biology: …” or “Life advice: …” or “Trivia: …”`
-        );
+        await interaction.editReply(`❌ Keep it GCSE / life / trivia.`);
         return;
       }
 
