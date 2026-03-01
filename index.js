@@ -1,4 +1,6 @@
-// index.js (ESM) — requires: "type": "module" in package.json
+// index.js (ESM) — discord.js v14
+// package.json should include: { "type": "module" }
+
 import {
   Client,
   GatewayIntentBits,
@@ -13,72 +15,144 @@ import {
 ========================= */
 const DISCORD_TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID = process.env.GUILD_ID;
+const GUILD_ID = process.env.GUILD_ID || null;
 
-const OLLAMA_BASE_URL = (process.env.OLLAMA_BASE_URL || "").replace(/\/+$/, "");
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3.2:3b";
-const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 120000);
-
-// /rp memory only
-const RP_MEMORY_TTL_MS = 15 * 60 * 1000;
-const RP_MAX_CONTEXT_TURNS = Number(process.env.RP_MAX_CONTEXT_TURNS || 12);
-
-const MAX_DISCORD_CHARS = 1800;
-
-const COOLDOWN_MS_ASK = Number(process.env.COOLDOWN_MS_ASK || 6000);
-const COOLDOWN_MS_RP = Number(process.env.COOLDOWN_MS_RP || 9000);
-const COOLDOWN_MS_ADMIN = 1500;
-
-const ADMIN_USER_ID = process.env.ADMIN_USER_ID || "";
-const OWNER_USERNAME = ".kyngbob";
-
-const HOSTER_ROLE_NAME = "; GW HOSTER :)";
+// IMPORTANT: put your Discord user ID here (Railway Variables)
+const OWNER_USER_ID = process.env.OWNER_USER_ID || "";
 
 /* =========================
-   CLIENT
+   STATE
 ========================= */
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds], // no disallowed intents
-});
-
-const rpMemory = new Map();
-const cooldowns = new Map();
-
-let botLocked = false;
+let isLocked = false;
 let lockReason = "";
+
+// Light cooldown for admin/owner commands to prevent spam
+const COOLDOWN_ADMIN_MS = 1500;
+const cooldowns = new Map(); // key -> last timestamp
+
+/* =========================
+   HELPERS
+========================= */
+function now() {
+  return Date.now();
+}
+
+function isOwner(user) {
+  return OWNER_USER_ID && user.id === OWNER_USER_ID;
+}
+
+function isAdminMember(member, user) {
+  if (isOwner(user)) return true;
+  try {
+    return member?.permissions?.has?.(PermissionFlagsBits.Administrator) ?? false;
+  } catch {
+    return false;
+  }
+}
+
+function checkCooldown(key, userId, ms) {
+  const k = `${key}:${userId}`;
+  const last = cooldowns.get(k) || 0;
+  const t = now();
+  if (t - last < ms) return ms - (t - last);
+  cooldowns.set(k, t);
+  return 0;
+}
+
+function normalizeRoleName(s) {
+  return (s || "")
+    .toLowerCase()
+    .replace(/[\s"'`~|]/g, "")
+    .replace(/[^\p{L}\p{N}]/gu, "");
+}
+
+function parseDurationMs(s) {
+  // supports: 10s, 5m, 2h, 1d, 1w
+  const m = /^(\d+)\s*([smhdw])$/i.exec((s ?? "").trim());
+  if (!m) return null;
+  const n = Number(m[1]);
+  const unit = m[2].toLowerCase();
+  const mult = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 }[unit];
+  return n * mult;
+}
+
+function extractUserId(token) {
+  // token can be: <@123>, <@!123>, 123
+  const t = (token ?? "").trim();
+  const m = t.match(/^<@!?(\d+)>$/) || t.match(/^(\d{15,25})$/);
+  return m ? m[1] : null;
+}
+
+/* =========================
+   /cmd parser (owner-only)
+========================= */
+async function runOwnerCommand(interaction, input) {
+  // tokenizer: keeps quoted parts together
+  const parts = input.match(/"([^"]+)"|\S+/g)?.map((p) => p.replace(/^"|"$/g, "")) ?? [];
+  if (parts.length === 0) return "No command provided.";
+
+  const verb = parts[0].toLowerCase();
+
+  async function getTargetMember() {
+    const id = extractUserId(parts[1] ?? "");
+    if (!id) throw new Error("2nd argument must be a user mention or ID.");
+    const member = await interaction.guild.members.fetch(id).catch(() => null);
+    if (!member) throw new Error("User not found in this server.");
+    return member;
+  }
+
+  if (verb === "ban") {
+    const member = await getTargetMember();
+    const reason = parts.slice(2).join(" ") || "No reason provided";
+    await member.ban({ reason });
+    return `✅ Banned ${member.user.tag}\nReason: ${reason}`;
+  }
+
+  if (verb === "kick") {
+    const member = await getTargetMember();
+    const reason = parts.slice(2).join(" ") || "No reason provided";
+    await member.kick(reason);
+    return `✅ Kicked ${member.user.tag}\nReason: ${reason}`;
+  }
+
+  if (verb === "timeout") {
+    const member = await getTargetMember();
+    const dur = parseDurationMs(parts[2] ?? "");
+    if (!dur) throw new Error('Duration invalid. Example: timeout @user 10m spamming');
+    const max = 28 * 24 * 60 * 60 * 1000;
+    if (dur > max) throw new Error("Max timeout is 28 days.");
+    const reason = parts.slice(3).join(" ") || "No reason provided";
+    await member.timeout(dur, reason);
+    return `✅ Timed out ${member.user.tag} for ${parts[2]}\nReason: ${reason}`;
+  }
+
+  if (verb === "untimeout" || verb === "unmute") {
+    const member = await getTargetMember();
+    const reason = parts.slice(2).join(" ") || "No reason provided";
+    await member.timeout(null, reason);
+    return `✅ Removed timeout for ${member.user.tag}\nReason: ${reason}`;
+  }
+
+  return `Unknown command: ${verb}\nSupported: ban, kick, timeout, untimeout`;
+}
 
 /* =========================
    SLASH COMMANDS
 ========================= */
 const commands = [
   new SlashCommandBuilder()
-    .setName("ask")
-    .setDescription("Ask Bob's AI about GCSE, life advice, or trivia.")
+    .setName("cmd")
+    .setDescription("OWNER ONLY: run moderation commands (ban/kick/timeout/etc)")
     .addStringOption((opt) =>
-      opt.setName("question").setDescription("Your question").setRequired(true)
-    ),
-
-  new SlashCommandBuilder()
-    .setName("rp")
-    .setDescription("Roleplay with Bob's AI (remembers last 15 mins).")
-    .addStringOption((opt) =>
-      opt.setName("scenario").setDescription("What happens next?").setRequired(true)
-    )
-    .addStringOption((opt) =>
-      opt.setName("style").setDescription("Optional style").setRequired(false)
-    )
-    .addIntegerOption((opt) =>
       opt
-        .setName("intensity")
-        .setDescription("1=chill, 5=max chaos")
-        .setMinValue(1)
-        .setMaxValue(5)
-        .setRequired(false)
+        .setName("command")
+        .setDescription('Example: ban @user reason | timeout @user 10m reason')
+        .setRequired(true)
     ),
 
   new SlashCommandBuilder()
     .setName("lock")
-    .setDescription("ADMIN: Lock Bob’s AI (stops /ask and /rp for everyone).")
+    .setDescription("ADMIN: Lock commands (blocks most commands for non-admins).")
     .addStringOption((opt) =>
       opt.setName("reason").setDescription("Optional reason shown while locked").setRequired(false)
     )
@@ -86,7 +160,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("unlock")
-    .setDescription("ADMIN: Unlock Bob’s AI.")
+    .setDescription("ADMIN: Unlock commands.")
     .setDefaultMemberPermissions(PermissionFlagsBits.SendMessages),
 
   new SlashCommandBuilder()
@@ -105,15 +179,12 @@ const commands = [
   new SlashCommandBuilder()
     .setName("say")
     .setDescription("ADMIN: Make the bot say something in the channel.")
-    .addStringOption((opt) =>
-      opt.setName("text").setDescription("Text").setRequired(true)
-    )
+    .addStringOption((opt) => opt.setName("text").setDescription("Text").setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.SendMessages),
 
-  // ✅ Visible to everyone (no default permissions)
   new SlashCommandBuilder()
     .setName("hoster")
-    .setDescription("OWNER ONLY: give .kyngbob the hoster role"),
+    .setDescription("OWNER ONLY: give the owner the hoster role"),
 ].map((c) => c.toJSON());
 
 async function registerCommands() {
@@ -121,408 +192,176 @@ async function registerCommands() {
     console.error("Missing TOKEN or CLIENT_ID.");
     return;
   }
+
   const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
 
   try {
     if (GUILD_ID) {
       await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-      console.log("✅ Registered GUILD slash commands.");
+      console.log(`✅ Registered guild commands to ${GUILD_ID}`);
     } else {
       await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-      console.log("✅ Registered GLOBAL slash commands (may take time).");
+      console.log("✅ Registered global commands (can take time to appear)");
     }
   } catch (err) {
-    console.error("❌ Command registration failed:", err);
+    console.error("Failed to register commands:", err);
   }
 }
 
 /* =========================
-   HELPERS
+   DISCORD CLIENT
 ========================= */
-const now = () => Date.now();
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds],
+});
 
-function isOwnerByUsername(interaction) {
-  const uname = interaction.user.username || "";
-  const gname = interaction.user.globalName || "";
-  return uname === OWNER_USERNAME || gname === OWNER_USERNAME;
-}
+client.once("ready", () => {
+  console.log(`🤖 Logged in as ${client.user.tag}`);
+});
 
-function isAdmin(interaction) {
-  if (ADMIN_USER_ID && interaction.user.id === ADMIN_USER_ID) return true;
-  return isOwnerByUsername(interaction);
-}
-
-function getCooldown(userId, cmd) {
-  const m = cooldowns.get(userId);
-  return m?.get(cmd) || 0;
-}
-function setCooldown(userId, cmd) {
-  let m = cooldowns.get(userId);
-  if (!m) {
-    m = new Map();
-    cooldowns.set(userId, m);
-  }
-  m.set(cmd, now());
-}
-
-function splitForDiscord(text) {
-  const chunks = [];
-  let s = text || "";
-  while (s.length > MAX_DISCORD_CHARS) {
-    let cut = s.lastIndexOf("\n", MAX_DISCORD_CHARS);
-    if (cut < 800) cut = MAX_DISCORD_CHARS;
-    chunks.push(s.slice(0, cut));
-    s = s.slice(cut).trimStart();
-  }
-  if (s.length) chunks.push(s);
-  return chunks;
-}
-
-function looksLikeMath(q) {
-  const s = (q || "").toLowerCase();
-  return (
-    /(\bsolve\b|\bcalculate\b|\bfind\b|\bequation\b|\bsimplify\b|\bfactor\b|\bexpand\b|\bprove\b|\bshow that\b)/.test(s) ||
-    /[0-9]/.test(s) ||
-    /[\+\-\*\/\=\^]/.test(s)
-  );
-}
-
-function classifyAsk(question) {
-  const q = (question || "").toLowerCase();
-  const gcseHints = [
-    "gcse","aqa","edexcel","ocr","wjec","paper","mark scheme","higher","foundation",
-    "osmosis","photosynthesis","respiration","enzymes","mitosis","moles","bonding",
-    "electrolysis","forces","waves","circuits","radiation","pressure","quadratic",
-    "trigonometry","circle theorem","simultaneous","macbeth","an inspector calls",
-    "poem","analysis","structure","history","geography","computer science","religious",
-    "french","spanish"
-  ];
-  const lifeHints = ["revise","revision","study","exam stress","motivation","how do i","help","tips"];
-  const triviaHints = ["trivia","general knowledge","who is","what is","capital","when was","where is"];
-
-  let gcse = 0, life = 0, trivia = 0;
-  for (const t of gcseHints) if (q.includes(t)) gcse += 3;
-  for (const t of lifeHints) if (q.includes(t)) life += 3;
-  for (const t of triviaHints) if (q.includes(t)) trivia += 2;
-  if (looksLikeMath(question)) gcse += 2;
-
-  const best = [
-    { cat: "gcse", score: gcse },
-    { cat: "life", score: life },
-    { cat: "trivia", score: trivia },
-  ].sort((a, b) => b.score - a.score)[0];
-
-  if (best.score <= 0) return { category: "other", confidence: 45 };
-  const confidence = Math.max(35, Math.min(95, 40 + best.score * 7));
-  return { category: best.cat, confidence };
-}
-
-function adjustConfidence(base, answer) {
-  let c = base;
-  const a = (answer || "").toLowerCase();
-  if (/\bnot sure\b|\bunsure\b|\bmaybe\b|\bi think\b/.test(a)) c -= 10;
-  if (/\bfinal answer\b|\btherefore\b|\bstep\b|\bworking\b/.test(a)) c += 6;
-  return Math.max(5, Math.min(99, Math.round(c)));
-}
-
-/* =========================
-   RP MEMORY
-========================= */
-function cleanRpMemory(userId) {
-  const mem = rpMemory.get(userId) || [];
-  const fresh = mem.filter((m) => now() - m.t < RP_MEMORY_TTL_MS);
-  const trimmed = fresh.slice(-RP_MAX_CONTEXT_TURNS);
-  rpMemory.set(userId, trimmed);
-  return trimmed;
-}
-function pushRp(userId, role, content) {
-  const mem = cleanRpMemory(userId);
-  mem.push({ role, content, t: now() });
-  rpMemory.set(userId, mem.slice(-RP_MAX_CONTEXT_TURNS));
-}
-
-/* =========================
-   OLLAMA
-========================= */
-async function ollamaChat(messages, { temperature = 0.4, num_predict = 200 } = {}) {
-  if (!OLLAMA_BASE_URL) throw new Error("Missing OLLAMA_BASE_URL");
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
-
-  try {
-    const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        stream: false,
-        messages,
-        options: { temperature, num_predict },
-      }),
-    });
-
-    if (!res.ok) {
-      const txt = await res.text().catch(() => "");
-      throw new Error(`Ollama HTTP ${res.status}: ${txt.slice(0, 250)}`);
-    }
-
-    const data = await res.json();
-    return (data?.message?.content || "").trim();
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/* =========================
-   PROMPTS
-========================= */
-function askSystemPrompt(category, isMath) {
-  if (category === "gcse") {
-    return (
-      `You are Bob's AI, a UK GCSE tutor.\n` +
-      `Be accurate and exam-focused.\n` +
-      `Answer in this structure:\n` +
-      `1) Key facts/definitions\n` +
-      `2) Method/Steps\n` +
-      `3) Exam-style explanation\n` +
-      `4) Final answer\n` +
-      `5) 1 common mistake\n` +
-      (isMath ? `For maths: show neat working and state the final answer clearly.\n` : "") +
-      `Be detailed but efficient.\n`
-    );
-  }
-  if (category === "life") return `You are Bob's AI. Give practical life advice with steps and a checklist.`;
-  return `You are Bob's AI. Answer trivia with a direct answer and 2 useful facts.`;
-}
-
-function rpSystemPrompt(intensity, styleHint) {
-  const hint = styleHint ? `User style request: ${styleHint}\n` : "";
-  return (
-    `You are roleplaying with the user.\n` +
-    `Match their typing style.\n` +
-    `Intensity: ${intensity}/5.\n` +
-    hint +
-    `Do not mention rules.\n`
-  );
-}
-
-/* =========================
-   ROLE MATCHING / HOSTER
-========================= */
-function normalizeRoleName(s) {
-  return (s || "")
-    .normalize("NFKC")
-    .toLowerCase()
-    .replace(/\s+/g, "")
-    .replace(/[“”‘’"']/g, "")
-    .replace(/[\u200B-\u200D\uFEFF]/g, "");
-}
-
-function findHosterRole(guild) {
-  const target = normalizeRoleName(HOSTER_ROLE_NAME);
-  return guild.roles.cache.find((r) => normalizeRoleName(r.name) === target);
-}
-
-async function giveOwnerHosterRole(interaction) {
-  if (!interaction.inGuild()) {
-    await interaction.reply({ content: "❌ This only works in a server.", ephemeral: true });
-    return;
-  }
-  if (!isOwnerByUsername(interaction)) {
-    await interaction.reply({ content: `❌ Only ${OWNER_USERNAME} can use /hoster.`, ephemeral: true });
-    return;
-  }
-
-  const guild = interaction.guild;
-  const member = await guild.members.fetch(interaction.user.id);
-
-  const role = findHosterRole(guild);
-  if (!role) {
-    await interaction.reply({
-      content: `❌ Couldn’t find the hoster role.\nCreate a role named like: ${HOSTER_ROLE_NAME} and try again.`,
-      ephemeral: true,
-    });
-    return;
-  }
-
-  const botMember = await guild.members.fetchMe();
-  if (!botMember.permissions.has(PermissionFlagsBits.ManageRoles)) {
-    await interaction.reply({ content: "❌ I need **Manage Roles** permission.", ephemeral: true });
-    return;
-  }
-  if (role.position >= botMember.roles.highest.position) {
-    await interaction.reply({
-      content: `❌ Move the hoster role below the bot’s top role in Server Settings → Roles.`,
-      ephemeral: true,
-    });
-    return;
-  }
-
-  if (member.roles.cache.has(role.id)) {
-    await interaction.reply({ content: "✅ You already have the hoster role.", ephemeral: true });
-    return;
-  }
-
-  await member.roles.add(role, "Owner used /hoster");
-  await interaction.reply(`✅ Granted you the role: **${role.name}**`);
-}
-
-/* =========================
-   INTERACTIONS
-========================= */
 client.on("interactionCreate", async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  const userId = interaction.user.id;
+  const member = interaction.member;
+
+  // Cooldown for admin/owner commands
+  if (["lock", "unlock", "lockreason", "status", "say", "cmd", "hoster"].includes(interaction.commandName)) {
+    const left = checkCooldown("admin", userId, COOLDOWN_ADMIN_MS);
+    if (left > 0) {
+      return interaction.reply({ content: `One sec… (${Math.ceil(left / 1000)}s)`, ephemeral: true });
+    }
+  }
+
+  // Lock gate: when locked, block most commands for non-admins/owner
+  // (Owner/admin can still use everything.)
+  const allowedWhileLocked = new Set(["status", "lockreason", "unlock", "lock", "cmd", "hoster"]);
+  if (isLocked && !isAdminMember(member, interaction.user) && !allowedWhileLocked.has(interaction.commandName)) {
+    const reason = lockReason ? `\nReason: ${lockReason}` : "";
+    return interaction.reply({
+      content: `🔒 Locked right now.${reason}`,
+      ephemeral: true,
+    });
+  }
+
   try {
-    if (!interaction.isChatInputCommand()) return;
+    /* ===== /cmd (owner only) ===== */
+    if (interaction.commandName === "cmd") {
+      if (!isOwner(interaction.user)) {
+        return interaction.reply({ content: "Owner only ❌", ephemeral: true });
+      }
+      const input = interaction.options.getString("command", true).trim();
+      await interaction.deferReply({ ephemeral: true });
 
-    const userId = interaction.user.id;
-    const cmd = interaction.commandName;
-
-    if (botLocked && (cmd === "ask" || cmd === "rp")) {
-      const reasonLine = lockReason ? `\n**Reason:** ${lockReason}` : "";
-      await interaction.reply({ content: `🔒 Bob’s AI is locked.${reasonLine}`, ephemeral: true });
-      return;
+      const out = await runOwnerCommand(interaction, input);
+      return interaction.editReply(out);
     }
 
-    const last = getCooldown(userId, cmd);
-    const cd = cmd === "ask" ? COOLDOWN_MS_ASK : cmd === "rp" ? COOLDOWN_MS_RP : COOLDOWN_MS_ADMIN;
-    if (now() - last < cd) {
-      const wait = Math.ceil((cd - (now() - last)) / 1000);
-      await interaction.reply({ content: `⏳ Try again in ${wait}s.`, ephemeral: true });
-      return;
+    /* ===== /lock ===== */
+    if (interaction.commandName === "lock") {
+      if (!isAdminMember(member, interaction.user)) {
+        return interaction.reply({ content: "Admin only ❌", ephemeral: true });
+      }
+      isLocked = true;
+      lockReason = interaction.options.getString("reason") || "";
+      return interaction.reply({
+        content: `🔒 Locked.${lockReason ? ` Reason: ${lockReason}` : ""}`,
+        ephemeral: true,
+      });
     }
-    setCooldown(userId, cmd);
 
-    // Admin commands
-    if (cmd === "lock" || cmd === "unlock" || cmd === "status" || cmd === "say" || cmd === "lockreason") {
-      if (!isAdmin(interaction)) {
-        await interaction.reply({ content: "❌ Not allowed.", ephemeral: true });
-        return;
+    /* ===== /unlock ===== */
+    if (interaction.commandName === "unlock") {
+      if (!isAdminMember(member, interaction.user)) {
+        return interaction.reply({ content: "Admin only ❌", ephemeral: true });
       }
+      isLocked = false;
+      lockReason = "";
+      return interaction.reply({ content: "🔓 Unlocked.", ephemeral: true });
+    }
 
-      if (cmd === "lock") {
-        botLocked = true;
-        const r = interaction.options.getString("reason")?.trim() || "";
-        if (r) lockReason = r;
-        const reasonLine = lockReason ? `\n**Reason:** ${lockReason}` : "";
-        await interaction.reply(`🔒 Locked. /ask and /rp disabled until /unlock.${reasonLine}`);
-        return;
+    /* ===== /lockreason ===== */
+    if (interaction.commandName === "lockreason") {
+      if (!isAdminMember(member, interaction.user)) {
+        return interaction.reply({ content: "Admin only ❌", ephemeral: true });
       }
-
-      if (cmd === "unlock") {
-        botLocked = false;
+      const reason = interaction.options.getString("reason");
+      if (!reason) {
+        return interaction.reply({
+          content: `Current lock reason: ${lockReason ? lockReason : "(none)"}`,
+          ephemeral: true,
+        });
+      }
+      if (reason.toLowerCase() === "clear") {
         lockReason = "";
-        await interaction.reply("🔓 Unlocked.");
-        return;
+        return interaction.reply({ content: "Cleared lock reason.", ephemeral: true });
       }
-
-      if (cmd === "lockreason") {
-        const r = interaction.options.getString("reason")?.trim();
-        if (!r) {
-          await interaction.reply(
-            `**Lock reason:** ${lockReason ? lockReason : "*none set*"}\n` +
-            `Set: /lockreason reason:<text> | Clear: /lockreason reason:clear`
-          );
-          return;
-        }
-        if (r.toLowerCase() === "clear") {
-          lockReason = "";
-          await interaction.reply("✅ Cleared lock reason.");
-          return;
-        }
-        lockReason = r;
-        await interaction.reply(`✅ Updated lock reason to: **${lockReason}**`);
-        return;
-      }
-
-      if (cmd === "status") {
-        await interaction.reply(
-          `**Status**\nLocked: **${botLocked ? "YES" : "NO"}**\n` +
-          `Reason: **${lockReason ? lockReason : "none"}**\n` +
-          `Model: **${OLLAMA_MODEL}**\nBase URL: **${OLLAMA_BASE_URL || "(missing)"}**\nTimeout: **${OLLAMA_TIMEOUT_MS}ms**`
-        );
-        return;
-      }
-
-      if (cmd === "say") {
-        const text = interaction.options.getString("text", true);
-        await interaction.reply({ content: "✅ Sent.", ephemeral: true });
-        await interaction.channel?.send(text);
-        return;
-      }
+      lockReason = reason;
+      return interaction.reply({ content: `Set lock reason: ${lockReason}`, ephemeral: true });
     }
 
-    // /hoster (visible to everyone, usable only by .kyngbob)
-    if (cmd === "hoster") {
-      await giveOwnerHosterRole(interaction);
-      return;
+    /* ===== /status ===== */
+    if (interaction.commandName === "status") {
+      if (!isAdminMember(member, interaction.user)) {
+        return interaction.reply({ content: "Admin only ❌", ephemeral: true });
+      }
+      return interaction.reply({
+        content:
+          `**Status**\n` +
+          `Locked: ${isLocked ? "YES" : "NO"}\n` +
+          `Reason: ${lockReason || "(none)"}\n` +
+          `Owner ID set: ${OWNER_USER_ID ? "YES" : "NO"}\n`,
+        ephemeral: true,
+      });
     }
 
-    await interaction.deferReply();
+    /* ===== /say ===== */
+    if (interaction.commandName === "say") {
+      if (!isAdminMember(member, interaction.user)) {
+        return interaction.reply({ content: "Admin only ❌", ephemeral: true });
+      }
+      const text = interaction.options.getString("text", true);
+      await interaction.reply({ content: "✅ Sent.", ephemeral: true });
+      return interaction.channel?.send(text);
+    }
 
-    if (cmd === "ask") {
-      const question = interaction.options.getString("question", true).trim();
-      const { category, confidence: baseConf } = classifyAsk(question);
-
-      if (category === "other") {
-        await interaction.editReply(`❌ Keep it GCSE / life / trivia.`);
-        return;
+    /* ===== /hoster (owner only) ===== */
+    if (interaction.commandName === "hoster") {
+      if (!isOwner(interaction.user)) {
+        return interaction.reply({ content: "Owner only ❌", ephemeral: true });
       }
 
-      const isMath = looksLikeMath(question);
-      const num_predict = isMath ? 220 : 200;
-      const temperature = isMath ? 0.15 : 0.35;
+      const desired = `; GW HOSTER :)`;
+      const desiredNorm = normalizeRoleName(desired);
 
-      const messages = [
-        { role: "system", content: askSystemPrompt(category, isMath) },
-        { role: "user", content: question },
-      ];
+      const role = interaction.guild.roles.cache.find((r) => normalizeRoleName(r.name) === desiredNorm);
 
-      const answer = await ollamaChat(messages, { temperature, num_predict });
-      const conf = adjustConfidence(baseConf, answer);
+      if (!role) {
+        return interaction.reply({
+          content: `Couldn't find the role "${desired}". Create it first (exact name), then run /hoster again.`,
+          ephemeral: true,
+        });
+      }
 
-      const out = `**Category:** ${category.toUpperCase()}\n**Confidence:** ${conf}%\n\n${answer}`;
-      const chunks = splitForDiscord(out);
-      await interaction.editReply(chunks[0]);
-      for (let i = 1; i < chunks.length; i++) await interaction.followUp(chunks[i]);
-      return;
+      const me = await interaction.guild.members.fetch(interaction.user.id);
+      if (me.roles.cache.has(role.id)) {
+        return interaction.reply({ content: "You already have the role ✅", ephemeral: true });
+      }
+
+      await me.roles.add(role);
+      return interaction.reply({ content: `✅ Added role: ${role.name}`, ephemeral: true });
     }
 
-    if (cmd === "rp") {
-      const scenario = interaction.options.getString("scenario", true).trim();
-      const style = interaction.options.getString("style")?.trim() || "";
-      const intensity = interaction.options.getInteger("intensity") || 4;
-
-      cleanRpMemory(userId);
-      pushRp(userId, "user", scenario);
-
-      const context = cleanRpMemory(userId).map(({ role, content }) => ({ role, content }));
-
-      const messages = [
-        { role: "system", content: rpSystemPrompt(intensity, style) },
-        ...context,
-        { role: "user", content: scenario },
-      ];
-
-      const answer = await ollamaChat(messages, { temperature: 0.9, num_predict: 240 });
-      pushRp(userId, "assistant", answer);
-
-      const out = `**Confidence:** ${adjustConfidence(70, answer)}%\n\n${answer}`;
-      const chunks = splitForDiscord(out);
-      await interaction.editReply(chunks[0]);
-      for (let i = 1; i < chunks.length; i++) await interaction.followUp(chunks[i]);
-      return;
-    }
-
-    await interaction.editReply("❓ Unknown command.");
+    return interaction.reply({ content: "Unknown command.", ephemeral: true });
   } catch (err) {
-    console.error("❌ interactionCreate error:", err);
+    console.error("Command error:", err);
+    const msg = `${err?.message ?? String(err)}`.slice(0, 1500);
+
     try {
       if (interaction.deferred || interaction.replied) {
-        await interaction.editReply("❌ Something went wrong (check Railway logs).");
+        await interaction.editReply(`❌ Error: ${msg}`);
       } else {
-        await interaction.reply({ content: "❌ Something went wrong (check Railway logs).", ephemeral: true });
+        await interaction.reply({ content: `❌ Error: ${msg}`, ephemeral: true });
       }
     } catch {}
   }
@@ -531,12 +370,13 @@ client.on("interactionCreate", async (interaction) => {
 /* =========================
    STARTUP
 ========================= */
-client.once("ready", () => {
-  console.log(`🤖 Logged in as ${client.user.tag}`);
-  console.log(`✅ Commands registered to: ${GUILD_ID ? "GUILD" : "GLOBAL"}`);
-});
-
-(async function main() {
+(async () => {
   await registerCommands();
+
+  if (!DISCORD_TOKEN) {
+    console.error("Missing TOKEN env var.");
+    process.exit(1);
+  }
+
   await client.login(DISCORD_TOKEN);
 })();
